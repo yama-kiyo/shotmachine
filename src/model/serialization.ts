@@ -43,5 +43,5 @@ export function deserializeProject(json: string): Project {
     version: 1,
     scene: { ...base.scene, ...obj.scene },
     shots,
-  } as Project
+  } as unknown as Project
 }
