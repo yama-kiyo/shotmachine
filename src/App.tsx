@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useStore } from './state/store'
+import { useStore, undo, redo } from './state/store'
 import { TopBar } from './ui/TopBar'
 import { LeftPanel } from './ui/LeftPanel'
 import { RightPanel } from './ui/RightPanel'
@@ -39,6 +39,18 @@ function Toast() {
 }
 
 export default function App() {
+  // Ctrl+Z / Ctrl+Y（入力欄フォーカス中は無効）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undo() }
+      else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') ||
+               ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')) { e.preventDefault(); redo() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   return (
     <div className="app">
       <TopBar />

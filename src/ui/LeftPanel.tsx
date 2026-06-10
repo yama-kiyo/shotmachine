@@ -1,12 +1,6 @@
 import { useShallow } from 'zustand/react/shallow'
 import { useStore, selectAxisStatus } from '../state/store'
-import { PROP_CATALOG } from '../model/defaults'
-import type { PropKind } from '../model/types'
-
-const PROP_BUTTONS: PropKind[] = [
-  'cube', 'table', 'chair', 'sofa', 'bed', 'counter', 'sink', 'desk',
-  'shelf', 'lamp', 'light', 'door', 'window', 'wall', 'plant', 'tv', 'rug',
-]
+import { PROP_CATALOG, SET_PROP_KINDS, EQUIPMENT_KINDS, LOCATION_TEMPLATES } from '../model/defaults'
 
 export function LeftPanel() {
   const st = useStore()
@@ -17,13 +11,32 @@ export function LeftPanel() {
 
   return (
     <div className="left-panel">
+      <div className="section-title">ロケテンプレート</div>
+      <select
+        style={{ width: '100%' }}
+        value=""
+        onChange={(e) => { if (e.target.value) st.applyTemplate(e.target.value) }}
+        data-testid="template-select"
+      >
+        <option value="">セットを選んで適用…</option>
+        {LOCATION_TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+      </select>
+
       <div className="section-title">追加</div>
       <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
         <button style={{ flex: 1 }} onClick={st.addCharacter} data-testid="add-character">＋ キャラクター</button>
         <button style={{ flex: 1 }} onClick={st.addCamera} data-testid="add-camera">＋ カメラ</button>
       </div>
       <div className="prop-grid">
-        {PROP_BUTTONS.map((k) => (
+        {SET_PROP_KINDS.map((k) => (
+          <button key={k} onClick={() => st.addProp(k)} data-testid={`add-prop-${k}`}>
+            {PROP_CATALOG[k].label}
+          </button>
+        ))}
+      </div>
+      <div className="section-title">撮影機材</div>
+      <div className="prop-grid">
+        {EQUIPMENT_KINDS.map((k) => (
           <button key={k} onClick={() => st.addProp(k)} data-testid={`add-prop-${k}`}>
             {PROP_CATALOG[k].label}
           </button>

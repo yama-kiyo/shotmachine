@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
+import { temporal } from 'zundo'
 import type {
   Project, Character, Prop, PropKind, CameraRig, CameraPose, Shot, ShotSize, AspectRatio,
 } from '../model/types'
 import { aspectToNumber } from '../model/types'
-import { sampleProject, emptyProject, makeCharacter, makeProp, makeCamera, genId } from '../model/defaults'
+import { sampleProject, emptyProject, makeCharacter, makeProp, makeCamera, genId, LOCATION_TEMPLATES, PROP_CATALOG } from '../model/defaults'
+import { v3 } from '../core/math'
 import { solveFraming, solveOTS, solvePOV, solveTwoShot, SHOT_SIZE_DEFS } from '../core/framing'
 import { establishSide, checkCameraSide, SideStatus } from '../core/axis180'
 import { generateCoverage } from '../core/coverage'
@@ -59,6 +61,9 @@ interface ShotmachineState {
   newProject: (sample: boolean) => void
   loadProject: (p: Project) => void
 
+  // テンプレート（V2）
+  applyTemplate: (key: string) => void
+
   // entities
   addCharacter: () => void
   addProp: (kind: PropKind) => void
@@ -108,8 +113,13 @@ interface ShotmachineState {
   setPlayTime: (t: number) => void
 }
 
+// ドラッグ操作の連続setを1履歴にまとめるスロットル
+let lastHistoryAt = 0
+const HISTORY_THROTTLE_MS = 400
+
 export const useStore = create<ShotmachineState>()(
-  immer((set, get) => ({
+  temporal(
+    immer((set, get) => ({
     project: sampleProject(),
     selection: null,
     viewMode: '3d',
@@ -149,6 +159,31 @@ export const useStore = create<ShotmachineState>()(
         st.moveSlider = 0
         st.playing = false
         st.playTime = 0
+      }),
+
+    applyTemplate: (key) =>
+      set((st) => {
+        const tpl = LOCATION_TEMPLATES.find((t) => t.key === key)
+        if (!tpl) return
+        // セット（部屋＋美術）を差し替え。キャラ・カメラ・機材・ショットは維持する
+        const keepEquipment = st.project.scene.props.filter(
+          (p) => PROP_CATALOG[p.kind].category === 'equipment',
+        )
+        st.project.scene.room = { ...tpl.room }
+        st.project.scene.props = [
+          ...tpl.props.map((tp) => ({
+            id: genId('prop'),
+            kind: tp.kind,
+            name: tp.name ?? PROP_CATALOG[tp.kind].label,
+            position: v3(tp.x, 0, tp.z),
+            rotationY: tp.ry ?? 0,
+            scale: v3(tp.sx ?? 1, 1, tp.sz ?? 1),
+          })),
+          ...keepEquipment,
+        ]
+        st.project.slugline = tpl.slugline
+        st.selection = null
+        st.toast = `テンプレート「${tpl.label}」を適用しました（キャラ・カメラは維持）`
       }),
 
     addCharacter: () =>
@@ -418,8 +453,23 @@ export const useStore = create<ShotmachineState>()(
 
     setPlaying: (p) => set((st) => { st.playing = p }),
     setPlayTime: (t) => set((st) => { st.playTime = t }),
-  })),
+    })),
+    {
+      // Undo対象はプロジェクト内容のみ（UI状態・再生状態は対象外）
+      partialize: (st) => ({ project: st.project }) as unknown as ShotmachineState,
+      limit: 60,
+      handleSet: (handleSet) => (state) => {
+        const now = Date.now()
+        if (now - lastHistoryAt < HISTORY_THROTTLE_MS) return
+        lastHistoryAt = now
+        handleSet(state)
+      },
+    },
+  ),
 )
+
+export const undo = (): void => { useStore.temporal.getState().undo() }
+export const redo = (): void => { useStore.temporal.getState().redo() }
 
 // ---- セレクタ ----
 export const selectAxisStatus = (st: ShotmachineState): Record<string, SideStatus> => {

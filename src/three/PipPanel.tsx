@@ -3,7 +3,7 @@ import { useStore } from '../state/store'
 import { aspectToNumber } from '../model/types'
 import { CameraView, FrameOverlay } from './CameraView'
 import { cameraHeightLabel, formatHeightLabel } from '../core/heightLabel'
-import { EYE_NORM } from '../core/framing'
+import { eyeY } from '../core/poseMetrics'
 
 export function PipPanel() {
   const cameras = useStore((s) => s.project.scene.cameras)
@@ -16,8 +16,8 @@ export function PipPanel() {
   const chars = useStore((s) => s.project.scene.characters)
   const cam = cameras.find((c) => c.id === pipCameraId) ?? cameras[0] ?? null
 
-  const eyeY = chars[0] ? chars[0].position.y + EYE_NORM * chars[0].height : undefined
-  const label = cam ? formatHeightLabel(cameraHeightLabel(cam.pose, eyeY)) : ''
+  const subjectEyeY = chars[0] ? eyeY(chars[0]) : undefined
+  const label = cam ? formatHeightLabel(cameraHeightLabel(cam.pose, subjectEyeY)) : ''
 
   return (
     <div className="pip" data-testid="pip-panel">

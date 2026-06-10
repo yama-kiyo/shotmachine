@@ -3,7 +3,8 @@ import type { Shot, Project, Character } from '../model/types'
 import { focalToHFovDeg } from './lens'
 import { aspectToNumber } from '../model/types'
 import { cameraHeightLabel, formatHeightLabel } from './heightLabel'
-import { SHOT_SIZE_LABELS_EN, EYE_NORM } from './framing'
+import { SHOT_SIZE_LABELS_EN } from './framing'
+import { eyeY, poseOf, POSE_METRICS } from './poseMetrics'
 import { MOVE_LABELS_JA } from './moveClassifier'
 import { sideOf } from './axis180'
 
@@ -23,11 +24,16 @@ export interface ShotPromptJson {
   camera_notes: string
 }
 
+const POSE_EN: Record<string, string> = {
+  stand: 'standing', sit: 'seated', crouch: 'crouching', lie: 'lying down',
+}
+
 function subjectBlocking(shot: Shot, char: Character): string {
   const pose = shot.poseSnapshot.a
   const s = sideOf(pose.position, pose.lookAt, char.position)
   const side = s === 0 ? 'center' : s === 1 ? 'frame left' : 'frame right'
-  return side
+  const p = poseOf(char)
+  return p === 'stand' ? side : `${side}, ${POSE_EN[p]}`
 }
 
 function movementText(shot: Shot): string {
@@ -53,12 +59,12 @@ export function shotToPromptJson(shot: Shot, project: Project, index: number): S
   const ar = aspectToNumber(project.aspect)
   const pose = shot.poseSnapshot.a
   const chars = project.scene.characters.filter((c) => shot.subjectIds.includes(c.id))
-  const eyeY = chars[0] ? chars[0].position.y + EYE_NORM * chars[0].height : undefined
+  const subjectEyeY = chars[0] ? eyeY(chars[0]) : undefined
   return {
     shot_number: shotNumber(index),
     shot_size: shot.shotSize ? SHOT_SIZE_LABELS_EN[shot.shotSize] : 'custom framing',
     lens: `${Math.round(pose.focalLength)}mm (${focalToHFovDeg(pose.focalLength, ar).toFixed(0)}° hFOV, full-frame)`,
-    camera_height: formatHeightLabel(cameraHeightLabel(pose, eyeY)),
+    camera_height: formatHeightLabel(cameraHeightLabel(pose, subjectEyeY)),
     camera_movement: movementText(shot),
     duration_sec: shot.durationSec,
     subjects: chars.map((c) => ({ name: c.name, blocking: subjectBlocking(shot, c) })),

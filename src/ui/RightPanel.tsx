@@ -1,10 +1,11 @@
 import { useStore } from '../state/store'
 import { FOCAL_PRESETS, focalToHFovDeg } from '../core/lens'
 import { aspectToNumber } from '../model/types'
-import type { ShotSize } from '../model/types'
+import type { ShotSize, BodyType } from '../model/types'
 import { classifyMove, MOVE_LABELS_JA } from '../core/moveClassifier'
 import { cameraHeightLabel, formatHeightLabel } from '../core/heightLabel'
-import { EYE_NORM, SHOT_SIZE_DEFS } from '../core/framing'
+import { SHOT_SIZE_DEFS } from '../core/framing'
+import { POSE_METRICS, eyeY } from '../core/poseMetrics'
 import { deg, rad, v3 } from '../core/math'
 import { secondsToTimecode } from '../core/timecode'
 
@@ -48,6 +49,30 @@ function ObjectTab() {
         </div>
         <div className="field-row"><label>向き °</label>
           <Num value={deg(c.rotationY)} step={5} onChange={(v) => st.updateCharacter(c.id, { rotationY: rad(v) })} />
+        </div>
+        <div className="field-row"><label>姿勢</label>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {(['stand', 'sit', 'crouch', 'lie'] as const).map((p) => (
+              <button
+                key={p}
+                className={(c.poseState ?? 'stand') === p ? 'active' : ''}
+                onClick={() => st.updateCharacter(c.id, { poseState: p })}
+                data-testid={`pose-${p}`}
+              >{POSE_METRICS[p].label}</button>
+            ))}
+          </div>
+        </div>
+        <div className="field-row"><label>体型</label>
+          <select
+            value={c.bodyType ?? 'average'}
+            onChange={(e) => st.updateCharacter(c.id, { bodyType: e.target.value as BodyType })}
+            data-testid="body-type"
+          >
+            <option value="average">標準</option>
+            <option value="broad">大柄</option>
+            <option value="slim">細身</option>
+            <option value="child">子供</option>
+          </select>
         </div>
         <div className="field-row">
           <button
@@ -100,7 +125,7 @@ function CameraTab() {
     (st.selection?.type === 'character' && chars.find((c) => c.id === st.selection!.id)) ||
     (st.project.axis && chars.find((c) => c.id === st.project.axis!.charAId)) ||
     chars[0]
-  const eyeY = frameTarget ? frameTarget.position.y + EYE_NORM * frameTarget.height : undefined
+  const subjectEyeY = frameTarget ? eyeY(frameTarget) : undefined
   const moveType = cam.poseA && cam.poseB ? classifyMove(cam.poseA, cam.poseB) : null
 
   const setPose = (patch: Parameters<typeof st.updateCameraPose>[1]) => {
@@ -156,7 +181,7 @@ function CameraTab() {
         <span style={{ width: 30, fontSize: 11 }}>{cam.pose.roll}°</span>
       </div>
       <div style={{ color: 'var(--text-dim)', fontSize: 11, margin: '4px 0' }}>
-        {formatHeightLabel(cameraHeightLabel(cam.pose, eyeY))}
+        {formatHeightLabel(cameraHeightLabel(cam.pose, subjectEyeY))}
       </div>
 
       <div className="section-title">

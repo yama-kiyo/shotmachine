@@ -4,9 +4,16 @@ import { Vec3, v3, sub, normalize, azimuthXZ, rad as toRad } from './math'
 import { focalToVFovDeg, focalToHFovDeg } from './lens'
 import type { Character, CameraPose } from '../model/types'
 import type { ShotSize } from '../model/types'
+import { POSE_METRICS, poseOf, eyeY, headTopY } from './poseMetrics'
 
-export const EYE_NORM = 0.93 // 目の高さ / 身長
+export const EYE_NORM = 0.93 // 立位の目の高さ / 身長（姿勢対応はposeMetrics経由）
 export const SHOULDER_NORM = 0.82
+
+// 姿勢を考慮したフレーミング基準身長。横臥は体厚基準になり過小になるため下限を設ける
+export function framingHeight(char: Character): number {
+  const eff = POSE_METRICS[poseOf(char)].topNorm * char.height
+  return Math.max(eff, 0.35 * char.height)
+}
 
 export interface FramingDef { top: number; bottom: number; lookAtNorm: number; label: string }
 
@@ -42,9 +49,11 @@ export function solveFraming(
   currentCamPos?: Vec3,
 ): CameraPose {
   const def = SHOT_SIZE_DEFS[size]
-  const span = (def.top - def.bottom) * char.height
+  const fh = framingHeight(char) // 姿勢対応（座位は低く・小さく）
+  const span = (def.top - def.bottom) * fh
   const d = framingDistance(span, focal, ar)
-  const lookY = char.position.y + def.lookAtNorm * char.height
+  // 目を狙うサイズ（CU系）は姿勢ごとの実際の目の高さを使う
+  const lookY = def.lookAtNorm >= 0.9 ? eyeY(char) : char.position.y + def.lookAtNorm * fh
   let az: number
   if (currentCamPos) az = azimuthXZ(char.position, currentCamPos)
   else az = char.rotationY // 正面（キャラ視線方向側）
@@ -57,9 +66,9 @@ export function solveFraming(
   return { position, lookAt, roll: 0, focalLength: focal }
 }
 
-// POV: キャラの目位置から視線方向
+// POV: キャラの目位置から視線方向（姿勢対応）
 export function solvePOV(char: Character, focal: number): CameraPose {
-  const eye = v3(char.position.x, char.position.y + EYE_NORM * char.height, char.position.z)
+  const eye = v3(char.position.x, eyeY(char), char.position.z)
   const f = forwardOf(char.rotationY)
   return {
     position: eye,
@@ -75,9 +84,9 @@ export function solveOTS(
 ): CameraPose {
   const dir = normalize(sub(target.position, over.position)) // over→target
   let perp = v3(dir.z, 0, -dir.x) // 右手方向
-  // カメラ位置候補: overの後方0.45m・肩外側（身長比例≈0.32m）・肩上0.15m
+  // カメラ位置候補: overの後方0.45m・肩外側（身長比例≈0.32m）・肩上0.15m（肩高さは姿勢対応）
   const shoulderOffset = 0.18 * over.height
-  const shoulderY = over.position.y + SHOULDER_NORM * over.height + 0.15
+  const shoulderY = over.position.y + SHOULDER_NORM * POSE_METRICS[poseOf(over)].topNorm * over.height + 0.15
   const mk = (p: Vec3): Vec3 => v3(
     over.position.x - dir.x * 0.45 + p.x * shoulderOffset,
     shoulderY,
@@ -91,11 +100,7 @@ export function solveOTS(
       (over.position.z - target.position.z) * (position.x - target.position.x)
     if (Math.sign(cross) !== lockedSide) position = mk(v3(-perp.x, 0, -perp.z))
   }
-  const lookAt = v3(
-    target.position.x,
-    target.position.y + EYE_NORM * target.height,
-    target.position.z,
-  )
+  const lookAt = v3(target.position.x, eyeY(target), target.position.z)
   return { position, lookAt, roll: 0, focalLength: focal }
 }
 
@@ -111,8 +116,8 @@ export function solveTwoShot(
   const widthM = Math.hypot(a.position.x - b.position.x, a.position.z - b.position.z) + 1.2 // 体幅+余白
   const hFov = toRad(focalToHFovDeg(focal, ar))
   const dH = widthM / 2 / Math.tan(hFov / 2)
-  const maxH = Math.max(a.height, b.height)
-  const spanV = 1.25 * maxH // 頭上余白込み
+  const maxH = Math.max(headTopY(a) - a.position.y, headTopY(b) - b.position.y, 0.35 * Math.max(a.height, b.height))
+  const spanV = 1.25 * maxH // 頭上余白込み（姿勢対応: 2人とも座っていれば寄れる）
   const dV = framingDistance(spanV, focal, ar)
   const d = Math.max(dH, dV)
   // 軸（A-B線）に垂直な方向に配置

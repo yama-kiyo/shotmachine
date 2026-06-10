@@ -5,3 +5,6 @@ playwright-report/
 .tsbuildinfo
 *.local
 *.tmp.*
+cm/
+docs_screenshot.png
+live_screenshot.png

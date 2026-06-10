@@ -125,6 +125,56 @@ test.describe('ショットマシン 主要フロー', () => {
     expect(download.suggestedFilename()).toContain('.shotmachine.json')
   })
 
+  test('V2 姿勢制御: 座らせるとCUのカメラ高さが下がる', async ({ page }) => {
+    await waitForApp(page)
+    // 立位でCU
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    await page.getByTestId('frame-CU').click()
+    await page.waitForTimeout(200)
+    const standY = parseFloat(await page.getByTestId('cam-pos-y').inputValue())
+    // Mayaを座らせる
+    await page.getByTestId('outliner-characters').getByText('Maya').click()
+    await page.getByTestId('pose-sit').click()
+    // 再度CU
+    await page.getByTestId('tab-camera').click()
+    await page.getByTestId('frame-CU').click()
+    await page.waitForTimeout(200)
+    const sitY = parseFloat(await page.getByTestId('cam-pos-y').inputValue())
+    expect(sitY).toBeLessThan(standY)
+  })
+
+  test('V2 ロケテンプレート: オフィス適用でセットが入れ替わる', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('template-select').selectOption('office')
+    await expect(page.getByTestId('slugline')).toHaveValue('INT. OFFICE — DAY')
+    await expect(page.locator('.left-panel')).toContainText('会議テーブル')
+    // キャラ・カメラは維持される
+    await expect(page.getByTestId('outliner-characters')).toContainText('Maya')
+    await expect(page.getByTestId('outliner-cameras')).toContainText('CAM A')
+  })
+
+  test('V2 機材＋配置図: 機材を置いてPDFをダウンロード', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('add-prop-lightstand').click()
+    await page.getByTestId('add-prop-dolly').click()
+    await expect(page.locator('.left-panel')).toContainText('ライト+スタンド')
+    await page.getByTestId('menu-export').click()
+    const downloadPromise = page.waitForEvent('download')
+    await page.getByText('機材配置図 PDF').click()
+    const dl = await downloadPromise
+    expect(dl.suggestedFilename()).toContain('配置図')
+  })
+
+  test('V2 Undo/Redo: キャラ追加を取り消し・やり直し', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('add-character').click()
+    await expect(page.getByTestId('outliner-characters')).toContainText('キャラ 3')
+    await page.getByTestId('undo').click()
+    await expect(page.getByTestId('outliner-characters')).not.toContainText('キャラ 3')
+    await page.getByTestId('redo').click()
+    await expect(page.getByTestId('outliner-characters')).toContainText('キャラ 3')
+  })
+
   test('シーンチャット: APIモックでカメラが下がる', async ({ page }) => {
     await waitForApp(page)
     // Anthropic APIをモック: adjust_camera(dy=-0.5)を返し、2回目はテキストで終了

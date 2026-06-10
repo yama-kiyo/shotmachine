@@ -9,7 +9,7 @@ import { aspectToNumber } from '../model/types'
 import type { CameraRig } from '../model/types'
 import { frustumCorners } from './poseUtils'
 import { SceneContent } from './SceneContent'
-import { EYE_NORM } from '../core/framing'
+import { eyeY } from '../core/poseMetrics'
 
 function CameraGizmo({ cam, status }: { cam: CameraRig; status: 'ok' | 'crossed' | 'on-line' | undefined }) {
   const select = useStore((s) => s.select)
@@ -88,15 +88,15 @@ function EyelinesOverlay() {
   return (
     <>
       {chars.map((c) => {
-        const eyeY = c.position.y + EYE_NORM * c.height
+        const ey = eyeY(c)
         const fx = Math.sin(c.rotationY)
         const fz = Math.cos(c.rotationY)
         return (
           <Line
             key={c.id}
             points={[
-              [c.position.x, eyeY, c.position.z],
-              [c.position.x + fx * 1.6, eyeY, c.position.z + fz * 1.6],
+              [c.position.x, ey, c.position.z],
+              [c.position.x + fx * 1.6, ey, c.position.z + fz * 1.6],
             ]}
             color={c.color} lineWidth={1.5} dashed dashSize={0.1} gapSize={0.07}
           />

@@ -27,20 +27,29 @@ export interface CameraRig {
   moveDurationSec: number
 }
 
+export type PoseState = 'stand' | 'sit' | 'crouch' | 'lie'
+export type BodyType = 'average' | 'broad' | 'slim' | 'child'
+
 export interface Character {
   id: string
   name: string
   color: string
   position: Vec3
   rotationY: number // ラジアン。視線方向 forward = (sin, 0, cos)
-  height: number // m。目の高さ = 0.93 * height
+  height: number // m。目の高さは姿勢依存（core/poseMetrics）
+  poseState?: PoseState // 省略時 'stand'
+  bodyType?: BodyType // 省略時 'average'
   pathB?: Vec3 // 移動パス終点（pathsオーバーレイ）
 }
 
 export type PropKind =
+  // セット・美術
   | 'cube' | 'table' | 'chair' | 'sofa' | 'bed' | 'counter' | 'sink'
   | 'desk' | 'shelf' | 'lamp' | 'light' | 'door' | 'window' | 'wall'
   | 'plant' | 'tv' | 'rug'
+  // 撮影機材（V2: 配置図エクスポート対象）
+  | 'lightstand' | 'ledpanel' | 'softbox' | 'cstand' | 'flag'
+  | 'dolly' | 'dollyrail' | 'tripod' | 'monitor' | 'reflector'
 
 export interface Prop {
   id: string

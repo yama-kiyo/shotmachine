@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect } from 'react'
-import { useStore } from '../state/store'
+import { useStore, undo, redo } from '../state/store'
 import type { AspectRatio } from '../model/types'
 import type { Overlays } from '../state/store'
 import { saveProjectFile, openProjectFile } from '../export/projectFile'
 import { exportPromptsMarkdown, exportPromptsJson } from '../export/prompts'
 import { downloadBoardPng } from '../export/boardPng'
 import { downloadBoardPdf } from '../export/boardPdf'
+import { downloadFloorPlanPdf, downloadFloorPlanPng } from '../export/floorPlan'
+import { downloadShotlistCsv } from '../export/shotlistCsv'
 
 function Menu({ label, items, testid }: {
   label: string
@@ -76,8 +78,13 @@ export function TopBar() {
           { label: 'ストーリーボード PNG', disabled: !shotsCount, onClick: () => { void downloadBoardPng(st.project) } },
           { label: 'AIプロンプト一覧（Markdown）', disabled: !shotsCount, onClick: () => exportPromptsMarkdown(st.project) },
           { label: 'AIプロンプト一覧（JSON）', disabled: !shotsCount, onClick: () => exportPromptsJson(st.project) },
+          { label: '機材配置図 PDF', onClick: () => { void downloadFloorPlanPdf(st.project) } },
+          { label: '機材配置図 PNG', onClick: () => downloadFloorPlanPng(st.project) },
+          { label: 'ショットリスト CSV', disabled: !shotsCount, onClick: () => downloadShotlistCsv(st.project) },
         ]}
       />
+      <button title="元に戻す (Ctrl+Z)" onClick={undo} data-testid="undo">↩</button>
+      <button title="やり直す (Ctrl+Y)" onClick={redo} data-testid="redo">↪</button>
       <input
         value={st.project.name}
         onChange={(e) => st.setProjectName(e.target.value)}
