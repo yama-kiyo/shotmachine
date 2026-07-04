@@ -92,6 +92,25 @@ describe('プロンプト生成', () => {
     expect(j.subjects[0].name).toBe('Maya')
   })
 
+  it('blocking左右はカメラから見たスクリーン方向（+Xの被写体はデフォルト視点でframe right）', () => {
+    // カメラ(0,1.5,5)→注視(0,1.5,0)のデフォルト視点では、ワールド+Xが画面右に映る
+    const p = structuredClone(project)
+    const [c1, c2] = p.scene.characters
+    c1.position = { x: 1.2, y: 0, z: 0 }
+    c2.position = { x: -1.2, y: 0, z: 0 }
+    const s: Shot = {
+      ...shot,
+      subjectIds: [c1.id, c2.id],
+      poseSnapshot: {
+        a: { position: v3(0, 1.5, 5), lookAt: v3(0, 1.5, 0), roll: 0, focalLength: 35 },
+      },
+    }
+    const j = shotToPromptJson(s, p, 0)
+    const byName = Object.fromEntries(j.subjects.map((sub) => [sub.name, sub.blocking]))
+    expect(byName[c1.name]).toContain('frame right')
+    expect(byName[c2.name]).toContain('frame left')
+  })
+
   it('3エンジンのテキストテンプレ（スナップショット）', () => {
     expect(shotToPromptText(shot, project, 0, 'seedance')).toMatchSnapshot()
     expect(shotToPromptText(shot, project, 0, 'veo')).toMatchSnapshot()

@@ -31,7 +31,9 @@ const POSE_EN: Record<string, string> = {
 function subjectBlocking(shot: Shot, char: Character): string {
   const pose = shot.poseSnapshot.a
   const s = sideOf(pose.position, pose.lookAt, char.position)
-  const side = s === 0 ? 'center' : s === 1 ? 'frame left' : 'frame right'
+  // sideOf の +1 は「カメラのスクリーン右方向 r=(-dz,0,dx) との内積が正」＝画面右。
+  // 旧実装は左右を逆に割り当てており、AI動画生成で立ち位置が反転していた（2026-07-04修正）
+  const side = s === 0 ? 'center' : s === 1 ? 'frame right' : 'frame left'
   const p = poseOf(char)
   return p === 'stand' ? side : `${side}, ${POSE_EN[p]}`
 }
