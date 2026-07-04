@@ -3,6 +3,9 @@ import { test, expect, Page } from '@playwright/test'
 // WebGL描画の安定を待つ
 async function waitForApp(page: Page) {
   await page.goto('/')
+  // STUDIO版は空シーンで起動するため、ファイルメニューからサンプルを開いて検証する
+  await page.getByTestId('menu-file').click()
+  await page.getByRole('button', { name: /サンプルを開く/ }).click()
   await expect(page.getByTestId('pip-panel')).toBeVisible()
   await page.waitForTimeout(1200) // canvas初期レンダリング
 }
@@ -231,5 +234,30 @@ test.describe('ショットマシン 主要フロー', () => {
     await expect(page.locator('.chat-msg.assistant')).toContainText('下げて', { timeout: 15000 })
     // カメラYが下がった（1.45 → 0.95）
     await expect.poll(async () => parseFloat(await posY.inputValue()), { timeout: 5000 }).toBeLessThan(before)
+  })
+  test('V3 時間帯・壁・機材光量・キーフレーム', async ({ page }) => {
+    await waitForApp(page)
+    // 時間帯切替
+    await page.getByTestId('tod-night').click()
+    await expect(page.getByTestId('tod-night')).toHaveClass(/active/)
+    await page.getByTestId('tod-evening').click()
+    await expect(page.getByTestId('tod-evening')).toHaveClass(/active/)
+    // 壁のオンオフと位置スライダー
+    await page.getByTestId('wall-back-toggle').uncheck()
+    await expect(page.getByTestId('wall-back-z')).toHaveCount(0)
+    await page.getByTestId('wall-back-toggle').check()
+    await expect(page.getByTestId('wall-back-z')).toBeVisible()
+    // 機材を追加 → 色・光量UIが出る
+    await page.getByTestId('add-prop-lightstand').click()
+    await expect(page.getByTestId('prop-color')).toBeVisible()
+    await expect(page.getByTestId('prop-light-intensity')).toBeVisible()
+    await page.getByTestId('prop-light-on').uncheck()
+    await expect(page.getByTestId('prop-light-intensity')).toBeDisabled()
+    // キーフレーム: キャラ選択 → 記録 → 削除
+    await page.getByTestId('outliner-characters').getByText('Maya').click()
+    await page.getByTestId('add-keyframe').click()
+    await expect(page.getByTestId('kf-jump-0')).toBeVisible()
+    await page.getByTestId('kf-remove-0').click()
+    await expect(page.getByTestId('kf-jump-0')).toHaveCount(0)
   })
 })

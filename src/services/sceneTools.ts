@@ -72,6 +72,17 @@ export const SCENE_TOOLS: ToolDef[] = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'set_time_of_day',
+    description: 'シーンの時間帯（ライティング）を設定する',
+    input_schema: {
+      type: 'object',
+      properties: {
+        time: { type: 'string', enum: ['morning', 'day', 'evening', 'night'], description: '朝/昼/夕/夜' },
+      },
+      required: ['time'],
+    },
+  },
+  {
     name: 'capture_shot',
     description: '現在のプレビューカメラのフレームをショットとしてキャプチャする',
     input_schema: { type: 'object', properties: {} },
@@ -156,6 +167,13 @@ export function executeTool(name: string, input: ToolInput): string {
     case 'add_camera': {
       const cam = st.addCamera()
       return `${cam.name} を追加しました`
+    }
+    case 'set_time_of_day': {
+      const t = input.time as string
+      if (!['morning', 'day', 'evening', 'night'].includes(t)) return 'エラー: 不正な時間帯です'
+      st.setTimeOfDay(t as 'morning' | 'day' | 'evening' | 'night')
+      const label = { morning: '朝', day: '昼', evening: '夕', night: '夜' }[t]
+      return `時間帯を「${label}」に設定しました`
     }
     case 'capture_shot': {
       st.captureShot()

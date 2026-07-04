@@ -11,7 +11,11 @@ export interface PropDef {
   yOffset?: number // 床から浮かせる量（windowなど）
   category?: 'set' | 'equipment' // 省略時 'set'。equipmentは機材配置図の対象
   planCode?: string // 配置図上の記号（機材用）
+  lightDefault?: number // 発光プロップの既定光量（0〜10）。定義があるとUIに光量調整が出る
 }
+
+// 発光可能なプロップかどうか
+export const isLightProp = (kind: PropKind): boolean => PROP_CATALOG[kind].lightDefault !== undefined
 
 export const PROP_CATALOG: Record<PropKind, PropDef> = {
   cube:    { label: 'キューブ', size: { w: 0.5, h: 0.5, d: 0.5 }, color: '#8a8f98' },
@@ -23,8 +27,8 @@ export const PROP_CATALOG: Record<PropKind, PropDef> = {
   sink:    { label: 'シンク', size: { w: 0.8, h: 0.9, d: 0.6 }, color: '#d4d9de' },
   desk:    { label: 'デスク', size: { w: 1.4, h: 0.74, d: 0.7 }, color: '#8c6f4e' },
   shelf:   { label: '棚', size: { w: 0.9, h: 1.8, d: 0.35 }, color: '#7d6448' },
-  lamp:    { label: 'ランプ', size: { w: 0.4, h: 1.6, d: 0.4 }, color: '#e8d9a8' },
-  light:   { label: '照明', size: { w: 0.3, h: 0.3, d: 0.3 }, color: '#ffe9b0' },
+  lamp:    { label: 'ランプ', size: { w: 0.4, h: 1.6, d: 0.4 }, color: '#e8d9a8', lightDefault: 4 },
+  light:   { label: '照明', size: { w: 0.3, h: 0.3, d: 0.3 }, color: '#ffe9b0', lightDefault: 4 },
   door:    { label: 'ドア', size: { w: 0.9, h: 2.1, d: 0.06 }, color: '#7a5c3e' },
   window:  { label: '窓', size: { w: 1.2, h: 1.0, d: 0.06 }, color: '#aac6d8', yOffset: 0.9 },
   wall:    { label: '壁', size: { w: 3.0, h: 2.6, d: 0.1 }, color: '#3a3f47' },
@@ -32,9 +36,9 @@ export const PROP_CATALOG: Record<PropKind, PropDef> = {
   tv:      { label: 'テレビ', size: { w: 1.2, h: 0.7, d: 0.08 }, color: '#22262c', yOffset: 0.7 },
   rug:     { label: 'ラグ', size: { w: 2.0, h: 0.02, d: 1.4 }, color: '#5a4f6b' },
   // ---- 撮影機材（V2） ----
-  lightstand: { label: 'ライト+スタンド', size: { w: 0.5, h: 2.1, d: 0.5 }, color: '#ffd9a0', category: 'equipment', planCode: 'L' },
-  ledpanel:   { label: 'LEDパネル', size: { w: 0.7, h: 1.9, d: 0.18 }, color: '#cfe2ff', category: 'equipment', planCode: 'LED' },
-  softbox:    { label: 'ソフトボックス', size: { w: 0.95, h: 2.0, d: 0.95 }, color: '#efe8d8', category: 'equipment', planCode: 'SB' },
+  lightstand: { label: 'ライト+スタンド', size: { w: 0.5, h: 2.1, d: 0.5 }, color: '#ffd9a0', category: 'equipment', planCode: 'L', lightDefault: 6 },
+  ledpanel:   { label: 'LEDパネル', size: { w: 0.7, h: 1.9, d: 0.18 }, color: '#cfe2ff', category: 'equipment', planCode: 'LED', lightDefault: 5 },
+  softbox:    { label: 'ソフトボックス', size: { w: 0.95, h: 2.0, d: 0.95 }, color: '#efe8d8', category: 'equipment', planCode: 'SB', lightDefault: 5 },
   cstand:     { label: 'Cスタンド', size: { w: 0.5, h: 1.8, d: 0.5 }, color: '#9aa0a8', category: 'equipment', planCode: 'C' },
   flag:       { label: 'フラッグ', size: { w: 0.9, h: 1.7, d: 0.06 }, color: '#23252b', category: 'equipment', planCode: 'FL' },
   dolly:      { label: 'ドリー', size: { w: 0.75, h: 0.55, d: 1.05 }, color: '#6a7078', category: 'equipment', planCode: 'D' },
@@ -175,7 +179,7 @@ export function makeCamera(index: number): CameraRig {
 
 export function emptyProject(): Project {
   return {
-    version: 1,
+    version: 2,
     name: '新規プロジェクト',
     slugline: 'INT. SCENE — DAY',
     aspect: '16:9',
@@ -184,8 +188,10 @@ export function emptyProject(): Project {
       characters: [],
       props: [],
       cameras: [],
+      timeOfDay: 'day',
     },
     shots: [],
+    audioTrack: [],
   }
 }
 
@@ -208,7 +214,7 @@ export function sampleProject(): Project {
     { id: 'cam_c', name: 'CAM C', pose: { position: v3(-2.4, 1.45, 1.9), lookAt: v3(1.3, 1.15, -0.1), roll: 0, focalLength: 65 }, moveDurationSec: 4 },
   ]
   return {
-    version: 1,
+    version: 2,
     name: 'Kitchen Argument (Sample)',
     slugline: 'INT. KITCHEN — NIGHT',
     aspect: '16:9',
@@ -217,8 +223,10 @@ export function sampleProject(): Project {
       characters: [maya, dan],
       props,
       cameras,
+      timeOfDay: 'night',
     },
     axis: { charAId: maya.id, charBId: dan.id, lockedSide: 1 },
     shots: [],
+    audioTrack: [],
   }
 }

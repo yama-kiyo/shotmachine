@@ -5,7 +5,7 @@ export default defineConfig({
   timeout: 60_000,
   retries: 1,
   use: {
-    baseURL: 'http://localhost:5180/shotmachine/',
+    baseURL: 'http://localhost:5183/',
     viewport: { width: 1600, height: 950 },
     screenshot: 'only-on-failure',
     launchOptions: {
@@ -15,9 +15,10 @@ export default defineConfig({
   },
   webServer: {
     // ビルド済みdistを配信（Dropboxドライブ上でdevサーバーの依存最適化が遅いため）
-    command: 'npx vite preview --port 5180 --strictPort',
-    url: 'http://localhost:5180/shotmachine/',
-    reuseExistingServer: !process.env.CI,
+    // reuseExistingServer: false — 残留サーバーを掴んで別バージョンを検証する事故の再発防止
+    command: 'npx vite preview --port 5183 --strictPort',
+    url: 'http://localhost:5183/',
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 })

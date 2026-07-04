@@ -1,10 +1,20 @@
+# 依存・ビルド（distはAPIキー埋め込みのため絶対にコミットしない）
 node_modules/
 dist/
+*.tsbuildinfo
+
+# 秘密情報
+.env
+*.local
+
+# 個人アセット・生成物（VRMモデル・音声入り動画・テスト出力）
+vrm/
+test/
 test-results/
 playwright-report/
-.tsbuildinfo
-*.local
 *.tmp.*
+
+# その他
 cm/
 docs_screenshot.png
 live_screenshot.png

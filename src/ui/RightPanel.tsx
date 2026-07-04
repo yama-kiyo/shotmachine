@@ -1,11 +1,17 @@
 import { useStore } from '../state/store'
 import { FOCAL_PRESETS, focalToHFovDeg } from '../core/lens'
 import { aspectToNumber } from '../model/types'
-import type { ShotSize, BodyType } from '../model/types'
+import type { ShotSize, BodyType, Character } from '../model/types'
+import { PROP_CATALOG, isLightProp } from '../model/defaults'
 import { classifyMove, MOVE_LABELS_JA } from '../core/moveClassifier'
 import { cameraHeightLabel, formatHeightLabel } from '../core/heightLabel'
 import { SHOT_SIZE_DEFS } from '../core/framing'
 import { POSE_METRICS, eyeY } from '../core/poseMetrics'
+import { setVrmBuffer, clearVrmBuffer } from '../three/VRMAvatar'
+import {
+  VrmEntry, pickVrmFolder, restoreVrmFolder, readVrmEntry, isFsApiAvailable,
+} from '../services/vrmLibrary'
+import { useState, useEffect } from 'react'
 import { deg, rad, v3 } from '../core/math'
 import { secondsToTimecode } from '../core/timecode'
 
@@ -24,6 +30,99 @@ function Num({ value, onChange, step = 0.1, testid }: {
 }
 
 const FRAME_SIZES: ShotSize[] = ['EWS', 'WS', 'FS', 'MS', 'MCU', 'CU', 'ECU', 'OTS', '2-SHOT', 'POV', 'INS']
+
+const ARM_LABELS: Record<string, string> = {
+  natural: '自然体', hands_on_hips: '腰に手', crossed: '腕組み',
+  wave: '手を振る', point: '指差し', tpose: 'Tポーズ',
+}
+
+// キャラクターのキーフレーム編集（再生バーの時間に状態を記録→再生で補間）
+function KeyframeSection({ char }: { char: Character }) {
+  const st = useStore()
+  const kfs = char.keyframes ?? []
+  return (
+    <>
+      <div className="section-title">キーフレーム</div>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>
+        再生バーの時間に位置・向き・姿勢・腕を記録。2点以上で再生時に移動します
+      </div>
+      <div className="field-row">
+        <button
+          style={{ flex: 1 }}
+          onClick={() => st.addCharKeyframe(char.id)}
+          data-testid="add-keyframe"
+        >＋ {st.playTime.toFixed(1)}秒 に現在の状態を記録</button>
+      </div>
+      {kfs.map((k, i) => (
+        <div key={`${k.time}-${i}`} className="field-row" style={{ fontSize: 11, gap: 4 }}>
+          <button
+            style={{ width: 64 }}
+            onClick={() => st.scrubTo(k.time)}
+            title="この時間へジャンプ（キーフレーム状態をプレビュー）"
+            data-testid={`kf-jump-${i}`}
+          >⏱ {k.time.toFixed(1)}s</button>
+          <span style={{ flex: 1, color: 'var(--text-dim)', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            ({k.position.x.toFixed(1)}, {k.position.z.toFixed(1)}) {POSE_METRICS[k.poseState].label}・{ARM_LABELS[k.armPose]}
+          </span>
+          <button onClick={() => st.removeCharKeyframe(char.id, i)} data-testid={`kf-remove-${i}`}>✕</button>
+        </div>
+      ))}
+      {kfs.length > 0 && (
+        <div className="field-row">
+          <button style={{ flex: 1 }} onClick={() => st.clearCharKeyframes(char.id)}>キーフレーム全消去</button>
+        </div>
+      )}
+    </>
+  )
+}
+
+// VRMライブラリの一覧はタブ切替をまたいで保持
+let vrmLibCache: VrmEntry[] = []
+
+// VRMライブラリ行: フォルダを一度選べば.vrm一覧からワンクリック割当
+function VrmLibraryRow({ charId, charName }: { charId: string; charName: string }) {
+  const st = useStore()
+  const [lib, setLib] = useState<VrmEntry[]>(vrmLibCache)
+  useEffect(() => {
+    // 前回のフォルダ権限が残っていれば自動復元（失敗は無視）
+    if (!vrmLibCache.length && isFsApiAvailable()) {
+      restoreVrmFolder().then((entries) => {
+        if (entries?.length) { vrmLibCache = entries; setLib(entries) }
+      }).catch(() => {})
+    }
+  }, [])
+  if (!isFsApiAvailable()) return null
+  const choose = async () => {
+    try {
+      const entries = await pickVrmFolder()
+      vrmLibCache = entries
+      setLib(entries)
+      st.setToast(entries.length ? `VRMを${entries.length}体見つけました` : 'フォルダに.vrmがありません')
+    } catch { /* キャンセル */ }
+  }
+  const assign = async (name: string) => {
+    const entry = lib.find((e) => e.name === name)
+    if (!entry) return
+    const buf = await readVrmEntry(entry)
+    setVrmBuffer(charId, buf)
+    st.updateCharacter(charId, { vrmFileName: entry.name })
+    st.setToast(`${charName} に「${entry.name}」を適用しました`)
+  }
+  return (
+    <div className="field-row"><label>ライブラリ</label>
+      <select
+        style={{ flex: 1, minWidth: 0 }}
+        value=""
+        onChange={(e) => { if (e.target.value) void assign(e.target.value) }}
+        data-testid="vrm-library-select"
+      >
+        <option value="">{lib.length ? `モデルを選択…（${lib.length}体）` : '（フォルダ未選択）'}</option>
+        {lib.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
+      </select>
+      <button title="vrmフォルダを選ぶ（例: shotmachine-studio/vrm）" onClick={() => void choose()} data-testid="vrm-folder-pick">📁</button>
+    </div>
+  )
+}
 
 function ObjectTab() {
   const st = useStore()
@@ -47,6 +146,9 @@ function ObjectTab() {
           <Num value={c.position.x} onChange={(v) => st.updateCharacter(c.id, { position: { ...c.position, x: v } })} testid="char-pos-x" />
           <Num value={c.position.z} onChange={(v) => st.updateCharacter(c.id, { position: { ...c.position, z: v } })} testid="char-pos-z" />
         </div>
+        <div className="field-row"><label>位置 Y</label>
+          <Num value={c.position.y} onChange={(v) => st.updateCharacter(c.id, { position: { ...c.position, y: v } })} testid="char-pos-y" />
+        </div>
         <div className="field-row"><label>向き °</label>
           <Num value={deg(c.rotationY)} step={5} onChange={(v) => st.updateCharacter(c.id, { rotationY: rad(v) })} />
         </div>
@@ -62,6 +164,23 @@ function ObjectTab() {
             ))}
           </div>
         </div>
+        {c.vrmFileName && (
+          <div className="field-row" style={{ alignItems: 'flex-start' }}><label>腕ポーズ</label>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {([
+                ['natural', '自然体'], ['hands_on_hips', '腰に手'], ['crossed', '腕組み'],
+                ['wave', '手を振る'], ['point', '指差し'], ['tpose', 'Tポーズ'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  className={(c.armPose ?? 'natural') === key ? 'active' : ''}
+                  onClick={() => st.updateCharacter(c.id, { armPose: key })}
+                  data-testid={`arm-${key}`}
+                >{label}</button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="field-row"><label>体型</label>
           <select
             value={c.bodyType ?? 'average'}
@@ -74,6 +193,34 @@ function ObjectTab() {
             <option value="child">子供</option>
           </select>
         </div>
+        <VrmLibraryRow charId={c.id} charName={c.name} />
+        <div className="field-row"><label>VRM</label>
+          <button
+            style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}
+            onClick={() => {
+              const input = document.createElement('input')
+              input.type = 'file'
+              input.accept = '.vrm'
+              input.onchange = async () => {
+                const file = input.files?.[0]
+                if (!file) return
+                const buf = await file.arrayBuffer()
+                setVrmBuffer(c.id, buf)
+                st.updateCharacter(c.id, { vrmFileName: file.name })
+                st.setToast(`${c.name} にVRMモデル「${file.name}」を適用しました`)
+              }
+              input.click()
+            }}
+            data-testid="vrm-load"
+            title="VRoid等で作成した.vrmファイルを読み込んでマネキンを差し替え"
+          >{c.vrmFileName ?? '.vrmモデルを読込…'}</button>
+          {c.vrmFileName && (
+            <button onClick={() => {
+              clearVrmBuffer(c.id)
+              st.updateCharacter(c.id, { vrmFileName: undefined })
+            }}>✕</button>
+          )}
+        </div>
         <div className="field-row">
           <button
             style={{ flex: 1 }}
@@ -82,6 +229,7 @@ function ObjectTab() {
           >移動パス: A地点を記録</button>
           {c.pathB && <button onClick={() => st.updateCharacter(c.id, { pathB: undefined })}>消去</button>}
         </div>
+        <KeyframeSection char={c} />
         <div className="field-row">
           <button className="danger" style={{ flex: 1 }} onClick={st.removeSelected}>削除</button>
         </div>
@@ -90,11 +238,49 @@ function ObjectTab() {
   }
   const p = st.project.scene.props.find((p) => p.id === sel.id)
   if (!p) return null
+  const lightCapable = isLightProp(p.kind)
+  const screenCapable = p.kind === 'monitor' || p.kind === 'tv'
   return (
     <div>
       <div className="field-row"><label>名前</label>
         <input type="text" value={p.name} onChange={(e) => st.updateProp(p.id, { name: e.target.value })} />
       </div>
+      <div className="field-row"><label>色</label>
+        <input
+          type="color"
+          value={p.color ?? PROP_CATALOG[p.kind].color}
+          onChange={(e) => st.updateProp(p.id, { color: e.target.value })}
+          data-testid="prop-color"
+        />
+        {p.color && (
+          <button onClick={() => st.updateProp(p.id, { color: undefined })} title="既定色に戻す">↺</button>
+        )}
+      </div>
+      {(lightCapable || screenCapable) && (
+        <div className="field-row"><label>{lightCapable ? '光量' : '画面'}</label>
+          <input
+            type="checkbox"
+            checked={p.lightOn ?? true}
+            onChange={(e) => st.updateProp(p.id, { lightOn: e.target.checked })}
+            title="点灯 / 消灯"
+            data-testid="prop-light-on"
+          />
+          {lightCapable && (
+            <>
+              <input
+                type="range" min={0} max={10} step={0.5} style={{ flex: 1 }}
+                value={p.lightIntensity ?? PROP_CATALOG[p.kind].lightDefault ?? 0}
+                disabled={!(p.lightOn ?? true)}
+                onChange={(e) => st.updateProp(p.id, { lightIntensity: parseFloat(e.target.value) })}
+                data-testid="prop-light-intensity"
+              />
+              <span style={{ width: 24, fontSize: 11 }}>
+                {(p.lightIntensity ?? PROP_CATALOG[p.kind].lightDefault ?? 0).toFixed(1)}
+              </span>
+            </>
+          )}
+        </div>
+      )}
       <div className="field-row"><label>位置 X/Z</label>
         <Num value={p.position.x} onChange={(v) => st.updateProp(p.id, { position: { ...p.position, x: v } })} />
         <Num value={p.position.z} onChange={(v) => st.updateProp(p.id, { position: { ...p.position, z: v } })} />
@@ -238,6 +424,19 @@ function ShotTab() {
       <div style={{ fontSize: 12, margin: '6px 0' }}>
         <b>{shot.cameraName}</b> · {shot.shotSize ?? '—'} · {Math.round(shot.focalLength)}mm · {shot.moveType}
       </div>
+      <div className="field-row"><label>カメラ</label>
+        <select
+          style={{ flex: 1 }}
+          value={shot.cameraId}
+          onChange={(e) => st.reassignShotCamera(shot.id, e.target.value)}
+          data-testid="shot-camera-select"
+          title="このカットのカメラを差し替え（構図・サムネイルを再撮影）"
+        >
+          {st.project.scene.cameras.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+      </div>
       <div className="field-row"><label>尺（秒）</label>
         <Num value={shot.durationSec} step={0.5} onChange={(v) => st.updateShot(shot.id, { durationSec: Math.max(0.5, v) })} testid="shot-duration" />
       </div>
@@ -257,6 +456,14 @@ function ShotTab() {
           onChange={(e) => st.updateShot(shot.id, { notes: { ...shot.notes, camera: e.target.value } })}
           placeholder="カメラ注記・台詞"
         />
+      </div>
+      <div className="field-row">
+        <button
+          style={{ flex: 1 }}
+          onClick={() => st.syncShotToCamera(shot.id)}
+          data-testid="sync-shot"
+          title="カメラを手で動かした後、このカットの構図・サムネイルを更新"
+        >📷 カメラの現在位置で更新</button>
       </div>
       <div style={{ display: 'flex', gap: 4 }}>
         <button onClick={() => st.moveShot(shot.id, -1)} disabled={idx === 0}>← 前へ</button>

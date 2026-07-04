@@ -4,6 +4,7 @@ import type { AspectRatio } from '../model/types'
 import type { Overlays } from '../state/store'
 import { saveProjectFile, openProjectFile } from '../export/projectFile'
 import { exportPromptsMarkdown, exportPromptsJson } from '../export/prompts'
+import { exportSeedancePackage } from '../services/frameExport'
 import { downloadBoardPng } from '../export/boardPng'
 import { downloadBoardPdf } from '../export/boardPdf'
 import { downloadFloorPlanPdf, downloadFloorPlanPng } from '../export/floorPlan'
@@ -52,7 +53,7 @@ export function TopBar() {
   const shotsCount = st.project.shots.length
   return (
     <div className="topbar">
-      <span className="logo">🎬 ショットマシン</span>
+      <span className="logo">🎬 ショットマシン STUDIO</span>
       <Menu
         label="ファイル"
         testid="menu-file"
@@ -78,6 +79,7 @@ export function TopBar() {
           { label: 'ストーリーボード PNG', disabled: !shotsCount, onClick: () => { void downloadBoardPng(st.project) } },
           { label: 'AIプロンプト一覧（Markdown）', disabled: !shotsCount, onClick: () => exportPromptsMarkdown(st.project) },
           { label: 'AIプロンプト一覧（JSON）', disabled: !shotsCount, onClick: () => exportPromptsJson(st.project) },
+          { label: 'Seedance生成パッケージ（ZIP）', disabled: !shotsCount, onClick: () => { void exportSeedancePackage() } },
           { label: '機材配置図 PDF', onClick: () => { void downloadFloorPlanPdf(st.project) } },
           { label: '機材配置図 PNG', onClick: () => downloadFloorPlanPng(st.project) },
           { label: 'ショットリスト CSV', disabled: !shotsCount, onClick: () => downloadShotlistCsv(st.project) },

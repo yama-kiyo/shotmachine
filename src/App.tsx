@@ -26,6 +26,18 @@ function MoveSlider() {
   )
 }
 
+// オートキーON中の赤枠＋バッジ（ビューポート外周に常時表示）
+function AutokeyOverlay() {
+  const autokey = useStore((s) => s.autokey)
+  if (!autokey) return null
+  return (
+    <>
+      <div className="autokey-border" data-testid="autokey-border" />
+      <div className="autokey-badge" data-testid="autokey-badge">🔴 AUTOKEY</div>
+    </>
+  )
+}
+
 function Toast() {
   const toast = useStore((s) => s.toast)
   const setToast = useStore((s) => s.setToast)
@@ -58,6 +70,7 @@ export default function App() {
         <LeftPanel />
         <div className="viewport-wrap">
           <MainViewport />
+          <AutokeyOverlay />
           <MoveSlider />
           <PipPanel />
           <Toast />

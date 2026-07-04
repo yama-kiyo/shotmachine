@@ -16,17 +16,37 @@ function PovRig({ getPose, aspect }: { getPose: () => CameraPose | null; aspect:
   return null
 }
 
-// ショットキャプチャ: 任意ポーズで同期レンダリングしてJPEG dataURLを返す関数をstoreに登録
+// ショットキャプチャ: 任意ポーズで同期レンダリングして dataURL を返す関数をstoreに登録。
+// 既定はサムネイル用のJPEG 0.75（現行解像度）。opts で PNG・高解像度バッファを選べる
+// （スタートフレーム書き出しは png/1920）。高解像度時は共有キャンバスを一時リサイズし、
+// 撮影直後に元サイズへ復元する（R3Fの描画ループは次フレームで元解像度に戻る）。
 function CaptureBridge({ enabled }: { enabled: boolean }) {
   const gl = useThree((s) => s.gl)
   const scene = useThree((s) => s.scene)
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera
   useEffect(() => {
     if (!enabled) return
-    registerCaptureFn((pose, ar) => {
+    registerCaptureFn((pose, ar, opts) => {
+      const toUrl = () =>
+        (opts?.format ?? 'jpeg') === 'png'
+          ? gl.domElement.toDataURL('image/png')
+          : gl.domElement.toDataURL('image/jpeg', 0.75)
+      const bufW = opts?.bufferWidth
+      if (bufW) {
+        const prevSize = gl.getSize(new THREE.Vector2())
+        const prevPr = gl.getPixelRatio()
+        gl.setPixelRatio(1)
+        gl.setSize(bufW, Math.round(bufW / ar), false)
+        applyPoseToCamera(camera, pose, ar)
+        gl.render(scene, camera)
+        const url = toUrl()
+        gl.setPixelRatio(prevPr)
+        gl.setSize(prevSize.x, prevSize.y, false)
+        return url
+      }
       applyPoseToCamera(camera, pose, ar)
       gl.render(scene, camera)
-      return gl.domElement.toDataURL('image/jpeg', 0.75)
+      return toUrl()
     })
     return () => registerCaptureFn(null)
   }, [gl, scene, camera, enabled])
@@ -38,21 +58,23 @@ export interface CameraViewProps {
   aspect: number
   width: number
   registerCapture?: boolean
+  bufferWidth?: number // 内部解像度（動画書き出し用に高解像度化できる）
   testid?: string
 }
 
-export function CameraView({ getPose, aspect, width, registerCapture = false, testid }: CameraViewProps) {
+export function CameraView({
+  getPose, aspect, width, registerCapture = false, bufferWidth = 640, testid,
+}: CameraViewProps) {
   const height = Math.round(width / aspect)
   const holder = useRef<HTMLDivElement>(null)
   return (
     <div ref={holder} style={{ width, height, position: 'relative' }} data-testid={testid}>
       <Canvas
         gl={{ preserveDrawingBuffer: true, antialias: true }}
-        dpr={Math.max(1, Math.min(2, 640 / width))}
+        dpr={Math.max(1, Math.min(4, bufferWidth / width))}
         camera={{ fov: 40, position: [0, 1.5, 4] }}
         style={{ position: 'absolute', inset: 0 }}
       >
-        <color attach="background" args={['#0b0d11']} />
         <SceneContent />
         <PovRig getPose={getPose} aspect={aspect} />
         {registerCapture && <CaptureBridge enabled />}

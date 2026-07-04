@@ -10,6 +10,7 @@ import type { CameraRig } from '../model/types'
 import { frustumCorners } from './poseUtils'
 import { SceneContent } from './SceneContent'
 import { eyeY } from '../core/poseMetrics'
+import { charStateAt } from '../core/charAnim'
 
 function CameraGizmo({ cam, status }: { cam: CameraRig; status: 'ok' | 'crossed' | 'on-line' | undefined }) {
   const select = useStore((s) => s.select)
@@ -106,23 +107,60 @@ function EyelinesOverlay() {
   )
 }
 
+// キーフレームを持つキャラのモーションパス（KF位置を順に結ぶ折れ線＋各KFマーカー
+// ＋再生ヘッド時刻に最も近いKFの強調＋現在の内挿位置ヘッド）
+function CharKfPath({ char, playTime }: { char: import('../model/types').Character; playTime: number }) {
+  const kfs = char.keyframes
+  if (!kfs?.length) return null
+  const pts = kfs.map((k) => [k.position.x, 0.05, k.position.z] as [number, number, number])
+  // 再生ヘッドに最も近いKF
+  let nearest = 0
+  let best = Infinity
+  kfs.forEach((k, i) => { const d = Math.abs(k.time - playTime); if (d < best) { best = d; nearest = i } })
+  const head = charStateAt(char, playTime).position
+  return (
+    <group>
+      {pts.length >= 2 && <Line points={pts} color={char.color} lineWidth={2} />}
+      {kfs.map((k, i) => (
+        <mesh key={i} position={[k.position.x, 0.06, k.position.z]}>
+          <sphereGeometry args={[i === nearest ? 0.09 : 0.06, 12, 8]} />
+          <meshBasicMaterial color={char.color} transparent opacity={i === nearest ? 1 : 0.6} />
+        </mesh>
+      ))}
+      {/* 現在時刻の内挿位置ヘッド */}
+      <mesh position={[head.x, 0.08, head.z]}>
+        <sphereGeometry args={[0.07, 12, 8]} />
+        <meshBasicMaterial color="#ffffff" />
+      </mesh>
+    </group>
+  )
+}
+
 function PathsOverlay() {
   const chars = useStore((s) => s.project.scene.characters)
   const cams = useStore((s) => s.project.scene.cameras)
   const show = useStore((s) => s.overlays.paths)
+  const playTime = useStore((s) => s.playTime)
   if (!show) return null
   return (
     <>
-      {chars.filter((c) => c.pathB).map((c) => (
-        <Line
-          key={c.id}
-          points={[
-            [c.pathB!.x, 0.05, c.pathB!.z],
-            [c.position.x, 0.05, c.position.z],
-          ]}
-          color={c.color} lineWidth={2}
-        />
-      ))}
+      {/* KFありは折れ線パス、KFなしで pathB ありは従来の2点直線 */}
+      {chars.map((c) =>
+        (c.keyframes?.length ?? 0) > 0
+          ? <CharKfPath key={c.id} char={c} playTime={playTime} />
+          : c.pathB
+            ? (
+              <Line
+                key={c.id}
+                points={[
+                  [c.pathB.x, 0.05, c.pathB.z],
+                  [c.position.x, 0.05, c.position.z],
+                ]}
+                color={c.color} lineWidth={2}
+              />
+            )
+            : null,
+      )}
       {cams.filter((c) => c.poseA && c.poseB).map((c) => (
         <Line
           key={c.id}
@@ -137,12 +175,15 @@ function PathsOverlay() {
   )
 }
 
-// 選択エンティティへのTransformControlsアタッチと書き戻し
+// 選択エンティティへのTransformControlsアタッチと書き戻し。
+// キャラ移動は「KF書き込みモード」判定付き: autokey ON、または再生ヘッドが既存KF上(±0.05s)なら
+// 静的position更新ではなくその時刻のKFへ書き込む。ドラッグ全体を1 Undo にまとめる。
 function SelectionGizmo() {
   const selection = useStore((s) => s.selection)
   const gizmoMode = useStore((s) => s.gizmoMode)
   const scene = useThree((s) => s.scene)
   const objRef = useRef<THREE.Object3D | null>(null)
+  const kfModeRef = useRef(false) // ドラッグ開始時に確定するKF書き込みモード
   const target = selection ? scene.getObjectByName(selection.id) ?? null : null
   objRef.current = target
   if (!target || !selection) return null
@@ -155,19 +196,32 @@ function SelectionGizmo() {
       size={0.7}
       showX={mode === 'rotate' ? false : true}
       showZ={mode === 'rotate' ? false : true}
-      showY={mode === 'rotate' ? true : !isCamera ? false : true}
+      showY={mode === 'rotate' ? true : true}
+      onMouseDown={() => {
+        const st = useStore.getState()
+        if (selection.type === 'character') {
+          const c = st.project.scene.characters.find((c) => c.id === selection.id)
+          const t = Math.round(st.playTime * 100) / 100
+          const onKf = c?.keyframes?.some((k) => Math.abs(k.time - t) <= 0.05) ?? false
+          kfModeRef.current = st.autokey || onKf
+        } else {
+          kfModeRef.current = false
+        }
+        // KF書き込みモードのみ1ドラッグ=1 Undo にまとめる。通常のposition更新は従来どおり
+        if (kfModeRef.current) st.beginTimelineDrag()
+      }}
+      onMouseUp={() => { if (kfModeRef.current) useStore.getState().endTimelineDrag() }}
       onObjectChange={() => {
         const o = objRef.current
         if (!o) return
         const st = useStore.getState()
         if (selection.type === 'character') {
-          st.updateCharacter(selection.id, {
-            position: { x: o.position.x, y: 0, z: o.position.z },
-            rotationY: o.rotation.y,
-          })
+          const patch = { position: { x: o.position.x, y: o.position.y, z: o.position.z }, rotationY: o.rotation.y }
+          if (kfModeRef.current) st.writeCharKeyframeFromGizmo(selection.id, patch)
+          else st.updateCharacter(selection.id, patch)
         } else if (selection.type === 'prop') {
           st.updateProp(selection.id, {
-            position: { x: o.position.x, y: 0, z: o.position.z },
+            position: { x: o.position.x, y: o.position.y, z: o.position.z },
             rotationY: o.rotation.y,
           })
         } else {
@@ -216,7 +270,6 @@ export function MainViewport() {
       style={{ position: 'absolute', inset: 0 }}
       data-testid="main-viewport"
     >
-      <color attach="background" args={['#101216']} />
       <Grid
         args={[30, 30]} position={[0, 0.01, 0]} cellSize={0.5} cellColor="#262a31"
         sectionSize={2} sectionColor="#343a44" fadeDistance={28} infiniteGrid

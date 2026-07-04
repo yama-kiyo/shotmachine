@@ -114,10 +114,12 @@ export function renderFloorPlanCanvas(project: Project): HTMLCanvasElement {
   ctx.strokeStyle = '#222'
   ctx.lineWidth = 3
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0)
-  // 壁の表現（太線）
+  // 壁の表現（太線）。壁は移動可能（backWallZ / sideWallX）なので実位置に描く
   ctx.lineWidth = 7
-  if (room.showBackWall) { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke() }
-  if (room.showSideWall) { ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.stroke() }
+  const wallY = t.toY(room.backWallZ ?? -room.depth / 2)
+  const wallX = t.toX(room.sideWallX ?? -room.width / 2)
+  if (room.showBackWall) { ctx.beginPath(); ctx.moveTo(x0, wallY); ctx.lineTo(x1, wallY); ctx.stroke() }
+  if (room.showSideWall) { ctx.beginPath(); ctx.moveTo(wallX, y0); ctx.lineTo(wallX, y1); ctx.stroke() }
 
   // セット美術（グレー）→ 機材（色付き＋記号）
   const setProps: Prop[] = props.filter((p) => (PROP_CATALOG[p.kind].category ?? 'set') === 'set')

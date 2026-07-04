@@ -3,23 +3,35 @@ import { immer } from 'zustand/middleware/immer'
 import { temporal } from 'zundo'
 import type {
   Project, Character, Prop, PropKind, CameraRig, CameraPose, Shot, ShotSize, AspectRatio,
+  RoomSpec, TimeOfDay, DialogueClip, Alignment,
 } from '../model/types'
+import { upsertKeyframe } from '../core/charAnim'
+import { emotionToArmPose } from '../core/emotionToArmPose'
 import { aspectToNumber } from '../model/types'
 import { sampleProject, emptyProject, makeCharacter, makeProp, makeCamera, genId, LOCATION_TEMPLATES, PROP_CATALOG } from '../model/defaults'
 import { v3 } from '../core/math'
+import {
+  shotStarts, roundTime, rollBoundary, rippleBoundary, splitShot, mergeShots, clampClip,
+  shotAtTime as cutShotAtTime,
+} from '../core/cutTrack'
+import { relayoutScriptClips, clampClipsToTotal } from '../core/audioTrack'
 import { solveFraming, solveOTS, solvePOV, solveTwoShot, SHOT_SIZE_DEFS } from '../core/framing'
 import { establishSide, checkCameraSide, SideStatus } from '../core/axis180'
 import { generateCoverage } from '../core/coverage'
 import { classifyMove } from '../core/moveClassifier'
 import { lerpPose } from '../core/interpolate'
+import { shotPoseAtU, moveU } from '../core/shotPose'
 import type { Vec3 } from '../core/math'
+import { parseScript } from '../core/scriptParser'
+import { buildCutscene } from '../core/sceneBuilder'
+import { defaultVoiceFor } from '../services/elevenlabs'
 
 export type SelectionType = 'character' | 'prop' | 'camera'
 export interface Selection { type: SelectionType; id: string }
 
 export type ViewMode = '3d' | 'top'
 export type GizmoMode = 'translate' | 'rotate'
-export type BottomTab = 'shots' | 'board' | 'animatic' | 'chat'
+export type BottomTab = 'shots' | 'board' | 'animatic' | 'chat' | 'script' | 'timeline'
 export type RightTab = 'object' | 'camera' | 'shot'
 
 export interface Overlays {
@@ -31,10 +43,38 @@ export interface Overlays {
   labels: boolean
 }
 
-// three層が登録するフレームキャプチャ関数（カメラポーズ→JPEG dataURL）
-export type CaptureFn = (pose: CameraPose, aspect: number) => string
+// three層が登録するフレームキャプチャ関数（カメラポーズ→dataURL）。
+// 既定はサムネイル用JPEG。opts で PNG・高解像度バッファを指定できる（スタートフレーム書き出し用）。
+export interface CaptureOpts { format?: 'jpeg' | 'png'; bufferWidth?: number }
+export type CaptureFn = (pose: CameraPose, aspect: number, opts?: CaptureOpts) => string
 let captureFn: CaptureFn | null = null
 export const registerCaptureFn = (fn: CaptureFn | null) => { captureFn = fn }
+export const getCaptureFn = (): CaptureFn | null => captureFn
+
+// カメラの手動調整を、そのカメラに紐づく台本カットへ自動反映する（デバウンス0.6秒）。
+// アニマティックはライブリンク済みなので、ここではサムネイル・凍結ポーズ（ボード/PDF出力用）を追従させる
+const pendingSyncCamIds = new Set<string>()
+let shotSyncTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleShotAutoSync(cameraId: string): void {
+  pendingSyncCamIds.add(cameraId)
+  if (shotSyncTimer) clearTimeout(shotSyncTimer)
+  shotSyncTimer = setTimeout(() => {
+    const ids = new Set(pendingSyncCamIds)
+    pendingSyncCamIds.clear()
+    if (!captureFn) return
+    const ar = aspectToNumber(useStore.getState().project.aspect)
+    useStore.setState((s) => {
+      for (const shot of s.project.shots) {
+        if (shot.source !== 'script' || !ids.has(shot.cameraId)) continue
+        const cam = s.project.scene.cameras.find((c) => c.id === shot.cameraId)
+        if (!cam) continue
+        shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
+        shot.focalLength = cam.pose.focalLength
+        shot.thumbnail = captureFn!(cam.pose, ar)
+      }
+    })
+  }, 600)
+}
 
 interface ShotmachineState {
   project: Project
@@ -49,6 +89,8 @@ interface ShotmachineState {
   moveSlider: number
   playing: boolean
   playTime: number
+  animScrub: boolean // 停止中でもキーフレームを評価表示する（スクラブ・再生後）
+  autokey: boolean // オートキー: ONでギズモ移動が再生ヘッド位置にKFを打つ（UI状態・Undo/保存対象外）
   lastFraming: Record<string, { size: ShotSize; subjectIds: string[] }>
   toast: string | null
   selectedShotId: string | null
@@ -64,6 +106,11 @@ interface ShotmachineState {
   // テンプレート（V2）
   applyTemplate: (key: string) => void
 
+  // スクリプトモード（STUDIO）
+  setScriptRaw: (raw: string) => void
+  importScript: (clearExisting?: boolean, preserveKeyframes?: boolean) => void
+  setVoice: (speaker: string, voiceId: string) => void
+
   // entities
   addCharacter: () => void
   addProp: (kind: PropKind) => void
@@ -71,6 +118,16 @@ interface ShotmachineState {
   removeSelected: () => void
   updateCharacter: (id: string, patch: Partial<Character>) => void
   updateProp: (id: string, patch: Partial<Prop>) => void
+  updateRoom: (patch: Partial<RoomSpec>) => void
+  setTimeOfDay: (t: TimeOfDay) => void
+
+  // キャラクターキーフレーム
+  addCharKeyframe: (charId: string) => void
+  removeCharKeyframe: (charId: string, index: number) => void
+  clearCharKeyframes: (charId: string) => void
+  moveCharKeyframe: (charId: string, index: number, newTime: number) => void // タイムライン: KF時刻変更
+  writeCharKeyframeFromGizmo: (charId: string, patch: { position: Vec3; rotationY: number }) => void // ギズモ→KF（autokey/既存KF編集）
+  setAutokey: (v: boolean) => void
   updateCameraPose: (id: string, patch: Partial<CameraPose>) => void
   updateCamera: (id: string, patch: Partial<Pick<CameraRig, 'name' | 'moveDurationSec'>>) => void
   duplicateCamera: (id: string) => void
@@ -104,34 +161,55 @@ interface ShotmachineState {
 
   // shots
   captureShot: () => void
+  syncShotToCamera: (shotId: string) => void
+  syncAllShotsToCameras: () => void
   removeShot: (id: string) => void
   moveShot: (id: string, dir: -1 | 1) => void
   updateShot: (id: string, patch: Partial<Shot>) => void
 
+  // カット編集（タイムライン）
+  rollCutBoundary: (boundaryIdx: number, deltaSec: number) => void
+  rippleCutBoundary: (boundaryIdx: number, deltaSec: number) => void
+  splitShotAtPlayhead: () => void
+  mergeShotWithNext: (shotId: string) => void
+  reassignShotCamera: (shotId: string, cameraId: string) => void
+  moveClip: (clipId: string, newStartSec: number) => void
+  applyVoiceToClip: (clipId: string, audio: string, alignment: Alignment | undefined, audioDurSec: number) => void
+  beginTimelineDrag: () => void
+  endTimelineDrag: () => void
+
   // playback
   setPlaying: (p: boolean) => void
   setPlayTime: (t: number) => void
+  scrubTo: (t: number) => void
 }
 
 // ドラッグ操作の連続setを1履歴にまとめるスロットル
 let lastHistoryAt = 0
 const HISTORY_THROTTLE_MS = 400
+const HISTORY_LIMIT = 60
+
+// タイムラインドラッグ開始時点のプロジェクト状態（1ドラッグ=1 Undo のチェックポイント）
+let dragSnapshot: ShotmachineState | null = null
 
 export const useStore = create<ShotmachineState>()(
   temporal(
     immer((set, get) => ({
-    project: sampleProject(),
+    // STUDIO版は空シーンで起動（サンプルはファイルメニューから開ける）
+    project: emptyProject(),
     selection: null,
     viewMode: '3d',
     gizmoMode: 'translate',
     overlays: { thirds: true, safe: false, axis180: true, eyelines: true, paths: true, labels: true },
-    bottomTab: 'shots',
+    bottomTab: 'script',
     rightTab: 'camera',
-    pipCameraId: 'cam_c',
+    pipCameraId: null,
     pipGrid: true,
     moveSlider: 0,
     playing: false,
     playTime: 0,
+    animScrub: false,
+    autokey: false,
     lastFraming: {},
     toast: null,
     selectedShotId: null,
@@ -149,6 +227,7 @@ export const useStore = create<ShotmachineState>()(
         st.moveSlider = 0
         st.playing = false
         st.playTime = 0
+        st.animScrub = false
       }),
     loadProject: (p) =>
       set((st) => {
@@ -159,7 +238,133 @@ export const useStore = create<ShotmachineState>()(
         st.moveSlider = 0
         st.playing = false
         st.playTime = 0
+        st.animScrub = false
       }),
+
+    setScriptRaw: (raw) => set((st) => { st.project.scriptRaw = raw }),
+    setVoice: (speaker, voiceId) =>
+      set((st) => {
+        st.project.voiceMap = { ...(st.project.voiceMap ?? {}), [speaker]: voiceId }
+      }),
+    importScript: (clearExisting = true, preserveKeyframes = false) => {
+      const stNow = get()
+      const raw = stNow.project.scriptRaw ?? ''
+      const lines = parseScript(raw)
+      if (!lines.length) { set((s) => { s.toast = '台本が空です' }); return }
+      const ar = aspectToNumber(stNow.project.aspect)
+      // 部屋の壁位置を渡し、開いている側にカメラを置く
+      const plan = buildCutscene(lines, stNow.project.scene.characters, ar, stNow.project.scene.room)
+      // KF保持ONで、台本に名前が残らず削除されるキャラのうちKFを持つものを控える（トースト用）
+      const droppedKfNames = clearExisting && preserveKeyframes
+        ? stNow.project.scene.characters
+            .filter((c) => (c.keyframes?.length ?? 0) > 0 && !plan.allSpeakerNames.includes(c.name))
+            .map((c) => c.name)
+        : []
+      set((st) => {
+        if (clearExisting) {
+          // 台本に登場しないキャラと全カメラ・全ショット・軸をクリア
+          // （台本と同名のキャラはVRM・身長設定ごと温存される）
+          st.project.scene.characters = st.project.scene.characters.filter(
+            (c) => plan.allSpeakerNames.includes(c.name),
+          )
+          // 温存キャラのキーフレームは旧台本の時間軸。KF保持OFFのときのみ破棄する
+          // （保持ON時は絶対時刻のまま残し、感情由来KFは upsertKeyframe が epsilon 置換する）
+          if (!preserveKeyframes) for (const c of st.project.scene.characters) c.keyframes = undefined
+          st.project.scene.cameras = []
+          st.project.shots = []
+          st.project.axis = undefined
+          st.selection = null
+        }
+        // 新規キャラ追加
+        st.project.scene.characters.push(...plan.characters)
+        // 生成カメラ追加（既存と名前衝突したら既存を使う）
+        const camByName = new Map(st.project.scene.cameras.map((c) => [c.name, c]))
+        for (const cam of plan.cameras) {
+          const existing = camByName.get(cam.name)
+          if (existing) {
+            existing.pose = cam.pose // 再取込時は解き直したポーズで更新
+          } else {
+            st.project.scene.cameras.push(cam)
+            camByName.set(cam.name, cam)
+          }
+        }
+        // 軸
+        if (plan.axis) {
+          const a = st.project.scene.characters.find((c) => c.name === plan.axis!.aName)
+          const b = st.project.scene.characters.find((c) => c.name === plan.axis!.bName)
+          if (a && b) st.project.axis = { charAId: a.id, charBId: b.id, lockedSide: plan.axis.lockedSide }
+        }
+        // ボイス割当（未割当の話者のみ）
+        const vm = { ...(st.project.voiceMap ?? {}) }
+        plan.allSpeakerNames.forEach((name, i) => { if (!vm[name]) vm[name] = defaultVoiceFor(i) })
+        st.project.voiceMap = vm
+        // ショット生成＋音声トラック生成（台本取込はショット列・音声トラックを置き換える）
+        // 各台本行 → カット1つ＋DialogueClip1つ。clipId で1:1に紐づけ、startSec=カット累積開始。
+        const charIdByName = new Map(st.project.scene.characters.map((c) => [c.name, c.id]))
+        const newAudioTrack: DialogueClip[] = []
+        let clipAcc = 0
+        st.project.shots = plan.shots.map((ps) => {
+          const cam = camByName.get(ps.cameraName)!
+          const thumbnail = captureFn ? captureFn(ps.pose, ar) : ''
+          const clipId = genId('clip')
+          const startSec = roundTime(clipAcc)
+          clipAcc += ps.durationSec
+          newAudioTrack.push({
+            id: clipId,
+            speaker: ps.speakerName ?? null,
+            text: ps.text,
+            emotion: ps.speakerName ? ps.emotion : undefined,
+            voiceId: ps.speakerName ? vm[ps.speakerName] : undefined,
+            startSec,
+            durationSec: roundTime(ps.durationSec),
+          })
+          return {
+            id: genId('shot'),
+            cameraId: cam.id,
+            cameraName: cam.name,
+            thumbnail,
+            shotSize: ps.shotSize,
+            focalLength: ps.pose.focalLength,
+            moveType: 'Static' as const,
+            subjectIds: ps.subjectNames.map((n) => charIdByName.get(n)!).filter(Boolean),
+            durationSec: ps.durationSec,
+            notes: { action: ps.speakerName ? '' : ps.text, camera: '' },
+            poseSnapshot: { a: JSON.parse(JSON.stringify(ps.pose)) },
+            source: 'script' as const,
+            clipId,
+          }
+        })
+        st.project.audioTrack = newAudioTrack
+        // 感情注記 → 腕ポーズの自動キーフレーム（段階③ジェスチャーAI・B案／腕ポーズのみ）。
+        // 各カット開始時刻に、話者キャラへ感情から推定した腕ポーズを1キー打つ。
+        // 'natural'（無記載・未知語・平静）はキーを打たず、既存挙動を温存する。
+        {
+          const charByName = new Map(st.project.scene.characters.map((c) => [c.name, c]))
+          let tAccum = 0
+          for (const ps of plan.shots) {
+            const speaker = ps.speakerName ? charByName.get(ps.speakerName) : undefined
+            if (speaker) {
+              const armPose = emotionToArmPose(ps.emotion)
+              if (armPose !== 'natural') {
+                speaker.keyframes = upsertKeyframe(speaker.keyframes, {
+                  time: Math.round(tAccum * 100) / 100,
+                  position: { ...speaker.position },
+                  rotationY: speaker.rotationY,
+                  poseState: speaker.poseState ?? 'stand',
+                  armPose,
+                })
+              }
+            }
+            tAccum += ps.durationSec
+          }
+        }
+        st.bottomTab = 'shots'
+        st.pipCameraId = camByName.get('MASTER')?.id ?? st.project.scene.cameras[0]?.id ?? null
+        st.toast = droppedKfNames.length
+          ? `${droppedKfNames.join('・')}のキーフレームは台本に名前がないため削除されました`
+          : `台本から${plan.shots.length}カット・カメラ${plan.cameras.length}台を生成しました`
+      })
+    },
 
     applyTemplate: (key) =>
       set((st) => {
@@ -238,11 +443,76 @@ export const useStore = create<ShotmachineState>()(
         const p = st.project.scene.props.find((p) => p.id === id)
         if (p) Object.assign(p, patch)
       }),
-    updateCameraPose: (id, patch) =>
+    updateRoom: (patch) =>
+      set((st) => {
+        Object.assign(st.project.scene.room, patch)
+      }),
+    setTimeOfDay: (t) => set((st) => { st.project.scene.timeOfDay = t }),
+
+    addCharKeyframe: (charId) =>
+      set((st) => {
+        const c = st.project.scene.characters.find((c) => c.id === charId)
+        if (!c) return
+        c.keyframes = upsertKeyframe(c.keyframes, {
+          time: Math.round(st.playTime * 100) / 100,
+          position: { ...c.position },
+          rotationY: c.rotationY,
+          poseState: c.poseState ?? 'stand',
+          armPose: c.armPose ?? 'natural',
+        })
+        st.toast = `${c.name} のキーフレームを ${st.playTime.toFixed(1)}秒 に記録しました`
+      }),
+    removeCharKeyframe: (charId, index) =>
+      set((st) => {
+        const c = st.project.scene.characters.find((c) => c.id === charId)
+        if (!c?.keyframes) return
+        c.keyframes.splice(index, 1)
+        if (!c.keyframes.length) c.keyframes = undefined
+      }),
+    clearCharKeyframes: (charId) =>
+      set((st) => {
+        const c = st.project.scene.characters.find((c) => c.id === charId)
+        if (c) c.keyframes = undefined
+      }),
+    // タイムライン: KFの時刻を変更（総尺内クランプ＋再ソート）。再生ヘッドを追従スクラブさせ3Dを更新
+    moveCharKeyframe: (charId, index, newTime) =>
+      set((st) => {
+        const c = st.project.scene.characters.find((c) => c.id === charId)
+        if (!c?.keyframes) return
+        const kf = c.keyframes[index]
+        if (!kf) return
+        const total = st.project.shots.reduce((a, s) => a + s.durationSec, 0)
+        const t = roundTime(Math.min(Math.max(newTime, 0), total))
+        const rest = c.keyframes.filter((_, i) => i !== index)
+        c.keyframes = upsertKeyframe(rest, { ...kf, time: t })
+        st.playTime = t
+        st.animScrub = true
+      }),
+    // ギズモからのKF書き込み（autokey ON、または再生ヘッドが既存KF上）。位置・向きのみ差し替え、
+    // 姿勢/腕は同時刻の既存KF→キャラ現在値の順で継承。再生ヘッド位置にKFが無ければ新規追加。
+    writeCharKeyframeFromGizmo: (charId, patch) =>
+      set((st) => {
+        const c = st.project.scene.characters.find((c) => c.id === charId)
+        if (!c) return
+        const time = roundTime(st.playTime)
+        const existing = c.keyframes?.find((k) => Math.abs(k.time - time) <= 0.05)
+        c.keyframes = upsertKeyframe(c.keyframes, {
+          time,
+          position: { ...patch.position },
+          rotationY: patch.rotationY,
+          poseState: existing?.poseState ?? c.poseState ?? 'stand',
+          armPose: existing?.armPose ?? c.armPose ?? 'natural',
+        })
+        st.animScrub = true
+      }),
+    setAutokey: (v) => set((st) => { st.autokey = v }),
+    updateCameraPose: (id, patch) => {
       set((st) => {
         const c = st.project.scene.cameras.find((c) => c.id === id)
         if (c) Object.assign(c.pose, patch)
-      }),
+      })
+      scheduleShotAutoSync(id) // ボード・サムネイルへの自動反映
+    },
     updateCamera: (id, patch) =>
       set((st) => {
         const c = st.project.scene.cameras.find((c) => c.id === id)
@@ -269,6 +539,7 @@ export const useStore = create<ShotmachineState>()(
     select: (sel) =>
       set((st) => {
         st.selection = sel
+        if (sel) st.animScrub = false // 編集に戻ったらキャラはベース状態の表示へ
         if (sel?.type === 'camera') {
           st.rightTab = 'camera'
           st.pipCameraId = sel.id
@@ -372,6 +643,7 @@ export const useStore = create<ShotmachineState>()(
         if (c && pose) c.pose = pose
         s.lastFraming[cam.id] = { size, subjectIds }
         s.pipCameraId = cam.id
+        scheduleShotAutoSync(cam.id)
       })
     },
 
@@ -432,6 +704,38 @@ export const useStore = create<ShotmachineState>()(
         s.toast = `ショットをキャプチャしました（${cam.name}）`
       })
     },
+    // カットの構図をカメラの現在位置で更新（ポーズ凍結＋サムネ再撮影）
+    syncShotToCamera: (shotId) => {
+      const stNow = get()
+      const ar = aspectToNumber(stNow.project.aspect)
+      set((st) => {
+        const shot = st.project.shots.find((s) => s.id === shotId)
+        if (!shot) return
+        const cam = st.project.scene.cameras.find((c) => c.id === shot.cameraId)
+        if (!cam) { st.toast = 'このカットのカメラは削除されています'; return }
+        shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
+        shot.poseSnapshot.b = cam.poseA && cam.poseB ? JSON.parse(JSON.stringify(cam.poseB)) : undefined
+        shot.focalLength = cam.pose.focalLength
+        if (captureFn) shot.thumbnail = captureFn(cam.pose, ar)
+        st.toast = `カットを ${cam.name} の現在位置で更新しました`
+      })
+    },
+    syncAllShotsToCameras: () => {
+      const stNow = get()
+      const ar = aspectToNumber(stNow.project.aspect)
+      set((st) => {
+        let n = 0
+        for (const shot of st.project.shots) {
+          const cam = st.project.scene.cameras.find((c) => c.id === shot.cameraId)
+          if (!cam) continue
+          shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
+          shot.focalLength = cam.pose.focalLength
+          if (captureFn) shot.thumbnail = captureFn(cam.pose, ar)
+          n++
+        }
+        st.toast = `${n}カットをカメラの現在位置に同期しました`
+      })
+    },
     removeShot: (id) =>
       set((st) => {
         st.project.shots = st.project.shots.filter((s) => s.id !== id)
@@ -451,8 +755,111 @@ export const useStore = create<ShotmachineState>()(
         if (s) Object.assign(s, patch)
       }),
 
-    setPlaying: (p) => set((st) => { st.playing = p }),
+    // 境界ロール: 左+δ/右−δ（合計不変）。音声との対応が崩れないタイムラインの既定操作
+    rollCutBoundary: (boundaryIdx, deltaSec) =>
+      set((st) => {
+        st.project.shots = rollBoundary(st.project.shots, boundaryIdx, deltaSec)
+      }),
+    // 境界リップル: 左カットのみ伸縮、以降は累積で後方シフト。総尺が変わるためクリップを再クランプ
+    rippleCutBoundary: (boundaryIdx, deltaSec) =>
+      set((st) => {
+        st.project.shots = rippleBoundary(st.project.shots, boundaryIdx, deltaSec)
+        const total = st.project.shots.reduce((a, s) => a + s.durationSec, 0)
+        st.project.audioTrack = clampClipsToTotal(st.project.audioTrack, total)
+      }),
+    // 再生ヘッド位置でカット分割。分割点ポーズでサムネ再撮影（左thumbnailB/右thumbnail）
+    splitShotAtPlayhead: () => {
+      const stNow = get()
+      const at = cutShotAtTime(stNow.project.shots, stNow.playTime)
+      if (!at) return
+      const shot = stNow.project.shots[at.idx]
+      const ar = aspectToNumber(stNow.project.aspect)
+      // 分割点のポーズは shotPose の共有実装で解決（ライブリンク/凍結の分岐を一元化）
+      const splitPose = shotPoseAtU(shot, stNow.project.scene.cameras, moveU(shot, at.tInShot)) ?? shot.poseSnapshot.a
+      const thumb = captureFn ? captureFn(splitPose, ar) : null
+      set((st) => {
+        const split = splitShot(st.project.shots, at.idx, at.tInShot, 0.5, () => genId('shot'))
+        if (!split) { st.toast = 'この位置ではカット分割できません（最小0.5秒）'; return }
+        if (thumb) {
+          split[at.idx] = { ...split[at.idx], thumbnailB: thumb }
+          split[at.idx + 1] = { ...split[at.idx + 1], thumbnail: thumb }
+        }
+        st.project.shots = split
+        st.selectedShotId = split[at.idx + 1].id
+        st.toast = 'カットを分割しました'
+      })
+    },
+    // 次カットと結合（同カメラ・連続ムーブならムーブ結合、それ以外は左カットのポーズ採用）
+    mergeShotWithNext: (shotId) =>
+      set((st) => {
+        const idx = st.project.shots.findIndex((s) => s.id === shotId)
+        if (idx < 0 || idx >= st.project.shots.length - 1) return
+        st.project.shots = mergeShots(st.project.shots, idx)
+      }),
+    // カメラ差し替え（任意タイミングのカットチェンジ後半）。ポーズ凍結＋サムネ再撮影込み
+    reassignShotCamera: (shotId, cameraId) => {
+      const stNow = get()
+      const cam = stNow.project.scene.cameras.find((c) => c.id === cameraId)
+      if (!cam) return
+      const ar = aspectToNumber(stNow.project.aspect)
+      const thumb = captureFn ? captureFn(cam.pose, ar) : null
+      set((st) => {
+        const shot = st.project.shots.find((s) => s.id === shotId)
+        if (!shot) return
+        shot.cameraId = cam.id
+        shot.cameraName = cam.name
+        shot.focalLength = cam.pose.focalLength
+        // script カットはライブリンクのまま（poseSnapshotは触らない）、capture カットは新ポーズを凍結
+        if (shot.source !== 'script') {
+          shot.poseSnapshot = { a: JSON.parse(JSON.stringify(cam.pose)) }
+        }
+        if (thumb) shot.thumbnail = thumb
+        st.toast = `カットを ${cam.name} に差し替えました`
+      })
+    },
+    // クリップの startSec 変更（[0,総尺]内・重なり禁止でクランプ）
+    moveClip: (clipId, newStartSec) =>
+      set((st) => {
+        const clip = st.project.audioTrack.find((c) => c.id === clipId)
+        if (!clip) return
+        const total = st.project.shots.reduce((a, s) => a + s.durationSec, 0)
+        clip.startSec = clampClip({ ...clip, startSec: newStartSec }, st.project.audioTrack, total).startSec
+      }),
+    // 一括TTS: クリップに音声/整列/尺を書き込み、紐づく script カット尺を実音声長+0.6s(間)へ。
+    // 全 script クリップを新しいカット開始へ貼り直して1:1整列を保つ（ripple＝累積で後方シフト）。
+    applyVoiceToClip: (clipId, audio, alignment, audioDurSec) =>
+      set((st) => {
+        const clip = st.project.audioTrack.find((c) => c.id === clipId)
+        if (!clip) return
+        clip.audio = audio
+        clip.alignment = alignment
+        clip.durationSec = roundTime(audioDurSec)
+        const shot = st.project.shots.find((s) => s.clipId === clipId)
+        if (shot) shot.durationSec = roundTime(audioDurSec + 0.6)
+        st.project.audioTrack = relayoutScriptClips(st.project.shots, st.project.audioTrack)
+      }),
+    // ドラッグ開始/終了: 連続setを1 Undo にまとめる。開始時点をチェックポイントに保持し、
+    // 終了時に「変化があれば」その1件だけ履歴へ push（zundoのpause中はset記録されないため手動）
+    beginTimelineDrag: () => {
+      dragSnapshot = { project: get().project } as unknown as ShotmachineState
+      useStore.temporal.getState().pause()
+    },
+    endTimelineDrag: () => {
+      const temporal = useStore.temporal.getState()
+      temporal.resume()
+      const snap = dragSnapshot
+      dragSnapshot = null
+      if (snap && get().project !== snap.project) {
+        useStore.temporal.setState((s) => ({
+          pastStates: [...s.pastStates, snap].slice(-HISTORY_LIMIT),
+          futureStates: [],
+        }))
+      }
+    },
+
+    setPlaying: (p) => set((st) => { st.playing = p; if (p) st.animScrub = true }),
     setPlayTime: (t) => set((st) => { st.playTime = t }),
+    scrubTo: (t) => set((st) => { st.playing = false; st.playTime = t; st.animScrub = true }),
     })),
     {
       // Undo対象はプロジェクト内容のみ（UI状態・再生状態は対象外）
@@ -468,8 +875,21 @@ export const useStore = create<ShotmachineState>()(
   ),
 )
 
-export const undo = (): void => { useStore.temporal.getState().undo() }
-export const redo = (): void => { useStore.temporal.getState().redo() }
+export const undo = (): void => {
+  useStore.temporal.getState().undo()
+  // 巻き戻し後にスクラブ表示が残ると、消えたキーフレームの状態に見えるため解除する
+  useStore.setState({ animScrub: false })
+}
+export const redo = (): void => {
+  useStore.temporal.getState().redo()
+  useStore.setState({ animScrub: false })
+}
+
+// 再生時間→現在ショット。cutTrack の純関数へ委譲（半開区間 [start,end) 規約）。
+export function shotAtTime(): { idx: number; tInShot: number } {
+  const st = useStore.getState()
+  return cutShotAtTime(st.project.shots, st.playTime) ?? { idx: 0, tInShot: 0 }
+}
 
 // ---- セレクタ ----
 export const selectAxisStatus = (st: ShotmachineState): Record<string, SideStatus> => {

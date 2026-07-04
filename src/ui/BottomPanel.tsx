@@ -2,25 +2,38 @@ import { useEffect, useRef, useState } from 'react'
 import { useStore, totalAnimaticDuration } from '../state/store'
 import { aspectToNumber } from '../model/types'
 import type { CameraPose } from '../model/types'
-import { lerpPose } from '../core/interpolate'
+import { animaticPoseAt as resolveAnimaticPose } from '../core/shotPose'
+import { shotAtTime } from '../core/cutTrack'
+import { activeClipsAt } from '../core/audioTrack'
 import { secondsToTimecode } from '../core/timecode'
 import { shotNumber } from '../core/promptGen'
 import { CameraView, FrameOverlay } from '../three/CameraView'
 import { SceneChat } from './SceneChat'
+import { ScriptTab } from './ScriptTab'
+import { TimelineTab } from './TimelineTab'
+import { getDialogueAudio } from '../services/audioBus'
+import { exportAnimaticVideo } from '../services/videoExport'
 
 function ShotsTab() {
   const shots = useStore((s) => s.project.shots)
   const selectedShotId = useStore((s) => s.selectedShotId)
   const selectShot = useStore((s) => s.selectShot)
+  const syncAll = useStore((s) => s.syncAllShotsToCameras)
   if (!shots.length) {
     return (
       <div className="hint" data-testid="shots-empty">
-        まだショットがありません — カメラプレビューでフレームを決めて「● ショットをキャプチャ」を押してください。
+        まだショットがありません — 📜スクリプトタブで台本から生成するか、カメラプレビューで「● ショットをキャプチャ」してください。
       </div>
     )
   }
   return (
-    <div className="shots-strip" data-testid="shots-strip">
+    <div>
+      <div style={{ marginBottom: 6 }}>
+        <button onClick={syncAll} data-testid="sync-shots" title="手で動かしたカメラの現在位置でサムネイル・ボードを更新">
+          ↻ 全カットをカメラに同期
+        </button>
+      </div>
+      <div className="shots-strip" data-testid="shots-strip">
       {shots.map((s, i) => (
         <div
           key={s.id}
@@ -36,6 +49,7 @@ function ShotsTab() {
           </div>
         </div>
       ))}
+      </div>
     </div>
   )
 }
@@ -86,43 +100,51 @@ function BoardTab() {
   )
 }
 
-// 再生時間からアニマティックのカメラポーズを解決
+// 再生時間からアニマティックのカメラポーズを解決（実装は core/shotPose に集約）。
+// script カット（source==='script'）はカメラと連動: カメラを手で直すと即反映される。
 function animaticPoseAt(): CameraPose | null {
   const st = useStore.getState()
-  const shots = st.project.shots
-  if (!shots.length) return null
-  let t = st.playTime
-  for (const s of shots) {
-    if (t <= s.durationSec) {
-      const { a, b } = s.poseSnapshot
-      return b ? lerpPose(a, b, t / Math.max(s.durationSec, 0.001)) : a
-    }
-    t -= s.durationSec
-  }
-  const last = shots[shots.length - 1]
-  return last.poseSnapshot.b ?? last.poseSnapshot.a
+  return resolveAnimaticPose(st.project.shots, st.project.scene.cameras, st.playTime)
 }
 
 function AnimaticTab() {
   const shots = useStore((s) => s.project.shots)
+  const audioTrack = useStore((s) => s.project.audioTrack)
   const aspect = aspectToNumber(useStore((s) => s.project.aspect))
   const playTime = useStore((s) => s.playTime)
   const overlays = useStore((s) => s.overlays)
+  const setToast = useStore((s) => s.setToast)
+  const viewRef = useRef<HTMLDivElement>(null)
+  const [recState, setRecState] = useState<{ recording: boolean; message: string }>({ recording: false, message: '' })
   if (!shots.length) return <div className="hint">ショットをキャプチャするとアニマティックを再生できます。</div>
-  // 現在のショット番号
-  let t = playTime, idx = 0
-  for (let i = 0; i < shots.length; i++) {
-    if (t <= shots[i].durationSec) { idx = i; break }
-    t -= shots[i].durationSec
-    idx = i
-  }
+  // 現在のショット番号（cutTrack 半開区間で解決）
+  const idx = shotAtTime(shots, playTime)?.idx ?? 0
   const height = 158
   const width = Math.round(height * aspect)
+  // 字幕は音声トラックのクリップから解決（speaker:null=ト書き / speaker あり=台詞）
+  const activeClip = activeClipsAt(audioTrack, playTime)[0]?.clip
+  const subtitleText = activeClip?.text
+    ? (activeClip.speaker ? `${activeClip.speaker}「${activeClip.text}」` : activeClip.text)
+    : ''
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }} data-testid="animatic-view">
-      <div style={{ position: 'relative' }}>
-        <CameraView getPose={animaticPoseAt} aspect={aspect} width={width} />
+      <div style={{ position: 'relative' }} ref={viewRef}>
+        <CameraView getPose={animaticPoseAt} aspect={aspect} width={width} bufferWidth={1280} />
         <FrameOverlay thirds={overlays.thirds} safe={overlays.safe} />
+        {/* 字幕 */}
+        {subtitleText && (
+          <div
+            data-testid="subtitle"
+            style={{
+              position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+              maxWidth: '92%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              background: 'rgba(0,0,0,0.65)', color: '#fff', fontSize: 12,
+              padding: '3px 10px', borderRadius: 4, pointerEvents: 'none',
+            }}
+          >
+            {subtitleText}
+          </div>
+        )}
       </div>
       <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
         <div style={{ fontSize: 14, color: 'var(--text)', fontWeight: 700 }}>
@@ -131,9 +153,52 @@ function AnimaticTab() {
         <div>{shots[idx].cameraName} · {shots[idx].shotSize ?? '—'} · {Math.round(shots[idx].focalLength)}mm · {shots[idx].moveType}</div>
         {shots[idx].notes.action && <div style={{ marginTop: 4 }}>ACTION: {shots[idx].notes.action}</div>}
         <div style={{ marginTop: 8 }}>下の再生バーで再生・シークできます。</div>
+        <div style={{ marginTop: 10 }}>
+          <button
+            className="capture-btn"
+            disabled={recState.recording}
+            data-testid="export-video"
+            onClick={() => {
+              const canvas = viewRef.current?.querySelector('canvas')
+              if (!canvas) { setToast('プレビューの初期化を待ってください'); return }
+              void exportAnimaticVideo(canvas, (s) => {
+                setRecState(s)
+                if (!s.recording && s.message) setToast(s.message)
+              })
+            }}
+          >
+            {recState.recording ? '⏺ 録画中…' : '🎬 動画として書き出し'}
+          </button>
+          {recState.recording && (
+            <div style={{ marginTop: 4, color: 'var(--warn)' }}>{recState.message}</div>
+          )}
+        </div>
       </div>
     </div>
   )
+}
+
+// セリフ音声の再生同期（クリップ切替で該当audioを再生）。要素はaudioBus共有（動画書き出しの録音経路と兼用）
+let audioClipId: string | null = null
+function syncDialogueAudio(playing: boolean) {
+  const dialogueAudio = getDialogueAudio()
+  if (!playing) {
+    dialogueAudio.pause()
+    audioClipId = null
+    return
+  }
+  const st = useStore.getState()
+  const hit = activeClipsAt(st.project.audioTrack, st.playTime).find((a) => a.clip.audio)
+  if (!hit) {
+    if (audioClipId !== null) { dialogueAudio.pause(); audioClipId = null }
+    return
+  }
+  if (audioClipId !== hit.clip.id) {
+    audioClipId = hit.clip.id
+    dialogueAudio.src = hit.clip.audio!
+    dialogueAudio.currentTime = Math.max(0, hit.tInClip)
+    void dialogueAudio.play().catch(() => {})
+  }
 }
 
 export function PlaybackBar() {
@@ -141,6 +206,7 @@ export function PlaybackBar() {
   const setPlaying = useStore((s) => s.setPlaying)
   const playTime = useStore((s) => s.playTime)
   const setPlayTime = useStore((s) => s.setPlayTime)
+  const scrubTo = useStore((s) => s.scrubTo)
   const total = useStore(totalAnimaticDuration)
   const setBottomTab = useStore((s) => s.setBottomTab)
   const raf = useRef<number>(0)
@@ -161,10 +227,14 @@ export function PlaybackBar() {
         return
       }
       st.setPlayTime(next)
+      syncDialogueAudio(true)
       raf.current = requestAnimationFrame(tick)
     }
     raf.current = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf.current)
+    return () => {
+      cancelAnimationFrame(raf.current)
+      syncDialogueAudio(false)
+    }
   }, [playing])
 
   return (
@@ -182,7 +252,8 @@ export function PlaybackBar() {
       <input
         type="range" min={0} max={Math.max(total, 0.001)} step={0.05}
         value={Math.min(playTime, total)}
-        onChange={(e) => { setPlaying(false); setPlayTime(parseFloat(e.target.value)) }}
+        onChange={(e) => scrubTo(parseFloat(e.target.value))}
+        disabled={total === 0}
       />
       <span className="time" data-testid="timecode">
         {secondsToTimecode(playTime)} / {secondsToTimecode(total)}
@@ -198,15 +269,21 @@ export function BottomPanel() {
   return (
     <div className="bottom-panel">
       <div className="bottom-tabs">
+        <button className={tab === 'script' ? 'active' : ''} onClick={() => setTab('script')} data-testid="tab-script">
+          📜 スクリプト
+        </button>
         <button className={tab === 'shots' ? 'active' : ''} onClick={() => setTab('shots')} data-testid="tab-shots">
           ショット{shotsCount ? `（${shotsCount}）` : ''}
         </button>
+        <button className={tab === 'timeline' ? 'active' : ''} onClick={() => setTab('timeline')} data-testid="tab-timeline">タイムライン</button>
         <button className={tab === 'board' ? 'active' : ''} onClick={() => setTab('board')} data-testid="tab-board">ボード</button>
         <button className={tab === 'animatic' ? 'active' : ''} onClick={() => setTab('animatic')} data-testid="tab-animatic">アニマティック</button>
         <button className={tab === 'chat' ? 'active' : ''} onClick={() => setTab('chat')} data-testid="tab-chat">✨ シーンチャット</button>
       </div>
       <div className="bottom-content">
+        {tab === 'script' && <ScriptTab />}
         {tab === 'shots' && <ShotsTab />}
+        {tab === 'timeline' && <TimelineTab />}
         {tab === 'board' && <BoardTab />}
         {tab === 'animatic' && <AnimaticTab />}
         {tab === 'chat' && <SceneChat />}
