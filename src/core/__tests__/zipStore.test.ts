@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { crc32, buildZip } from '../zipStore'
+import { crc32, buildZip, toDosDateTime } from '../zipStore'
 
 const u8 = (s: string): Uint8Array => new TextEncoder().encode(s)
 
@@ -58,5 +58,42 @@ describe('zipStore: buildZip', () => {
     expect(zip.length).toBe(22)
     expect(readU32(zip, 0)).toBe(0x06054b50)
     expect(readU16(zip, 8)).toBe(0)
+  })
+
+  it('mtime を固定すると DOS date/time がローカル・中央の両方に入り決定的になる', () => {
+    // 2026-01-02 03:04:05（ローカルタイム）
+    const mtime = new Date(2026, 0, 2, 3, 4, 5)
+    // DOS date = ((2026-1980)<<9)|(1<<5)|2 = 0x5C22
+    // DOS time = (3<<11)|(4<<5)|(5>>1)   = 0x1882
+    const expDate = 0x5c22
+    const expTime = 0x1882
+
+    const zip = buildZip([{ name: 'a.txt', data: u8('hello') }], { mtime })
+    // ローカルヘッダ: offset10=time / offset12=date
+    expect(readU16(zip, 10)).toBe(expTime)
+    expect(readU16(zip, 12)).toBe(expDate)
+    // 中央ディレクトリ: offset12=time / offset14=date
+    const eocdOff = zip.length - 22
+    const cdOffset = readU32(zip, eocdOff + 16)
+    expect(readU16(zip, cdOffset + 12)).toBe(expTime)
+    expect(readU16(zip, cdOffset + 14)).toBe(expDate)
+
+    // 同一入力・同一 mtime ならバイト完全一致（決定的）
+    const zip2 = buildZip([{ name: 'a.txt', data: u8('hello') }], { mtime })
+    expect(Array.from(zip)).toEqual(Array.from(zip2))
+  })
+})
+
+describe('zipStore: toDosDateTime', () => {
+  it('1980-01-01 00:00:00 → date=0x0021, time=0', () => {
+    expect(toDosDateTime(new Date(1980, 0, 1, 0, 0, 0))).toEqual({ date: 0x0021, time: 0 })
+  })
+
+  it('1980未満は下限 1980-01-01 へクランプ', () => {
+    expect(toDosDateTime(new Date(1970, 5, 15, 12, 30, 40))).toEqual({ date: 0x0021, time: 0 })
+  })
+
+  it('一般値 2026-01-02 03:04:05 → date=0x5C22, time=0x1882', () => {
+    expect(toDosDateTime(new Date(2026, 0, 2, 3, 4, 5))).toEqual({ date: 0x5c22, time: 0x1882 })
   })
 })

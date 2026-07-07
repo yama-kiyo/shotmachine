@@ -24,9 +24,34 @@ export function crc32(data: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0
 }
 
-// STORE方式のZIPバイト列を組み立てる。タイムスタンプは0固定（決定的な出力）。
+// Date を DOS date/time（MS-DOS 形式）へ変換する純関数。
+// DOS time = (hours<<11)|(minutes<<5)|(seconds>>1)
+// DOS date = ((year-1980)<<9)|(month<<5)|day  ※month=1-12, day=1-31, year>=1980
+// ローカルタイム（getHours 等）で算出。1980未満は 1980-01-01 へクランプ。
+export function toDosDateTime(d: Date): { date: number; time: number } {
+  const year = d.getFullYear()
+  if (year < 1980) {
+    // DOS の下限（1980-01-01）へ丸める
+    return { date: (0 << 9) | (1 << 5) | 1, time: 0 }
+  }
+  const month = d.getMonth() + 1 // getMonth は 0-11 → DOS は 1-12
+  const day = d.getDate()
+  const time =
+    ((d.getHours() & 0x1f) << 11) |
+    ((d.getMinutes() & 0x3f) << 5) |
+    ((d.getSeconds() >> 1) & 0x1f)
+  const date = (((year - 1980) & 0x7f) << 9) | ((month & 0x0f) << 5) | (day & 0x1f)
+  return { date, time }
+}
+
+// STORE方式のZIPバイト列を組み立てる。
+// タイムスタンプは opts.mtime（省略時は呼び出し時の実時刻）をローカルタイムで書き込む。
 // 戻り値は ArrayBuffer 裏付けを明示（Blob へ直接渡せるように）。
-export function buildZip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
+export function buildZip(
+  entries: ZipEntry[],
+  opts?: { mtime?: Date },
+): Uint8Array<ArrayBuffer> {
+  const { date: dosDate, time: dosTime } = toDosDateTime(opts?.mtime ?? new Date())
   const enc = new TextEncoder()
   const localChunks: Uint8Array[] = []
   const centralChunks: Uint8Array[] = []
@@ -44,8 +69,8 @@ export function buildZip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
     lv.setUint16(4, 20, true) // 展開に必要なバージョン(2.0)
     lv.setUint16(6, 0x0800, true) // 汎用フラグ: bit11 = ファイル名UTF-8
     lv.setUint16(8, 0, true) // 圧縮方式: 0=STORE
-    lv.setUint16(10, 0, true) // 更新時刻
-    lv.setUint16(12, 0, true) // 更新日付
+    lv.setUint16(10, dosTime, true) // 更新時刻（DOS time）
+    lv.setUint16(12, dosDate, true) // 更新日付（DOS date）
     lv.setUint32(14, crc, true)
     lv.setUint32(18, size, true) // 圧縮後サイズ（=無圧縮サイズ）
     lv.setUint32(22, size, true) // 無圧縮サイズ
@@ -62,8 +87,8 @@ export function buildZip(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
     cv.setUint16(6, 20, true) // 展開に必要なバージョン
     cv.setUint16(8, 0x0800, true) // 汎用フラグ
     cv.setUint16(10, 0, true) // 圧縮方式
-    cv.setUint16(12, 0, true) // 更新時刻
-    cv.setUint16(14, 0, true) // 更新日付
+    cv.setUint16(12, dosTime, true) // 更新時刻（DOS time）
+    cv.setUint16(14, dosDate, true) // 更新日付（DOS date）
     cv.setUint32(16, crc, true)
     cv.setUint32(20, size, true)
     cv.setUint32(24, size, true)
