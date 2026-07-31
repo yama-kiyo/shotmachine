@@ -1,7 +1,8 @@
 import { useStore } from '../state/store'
 import { FOCAL_PRESETS, focalToHFovDeg } from '../core/lens'
 import { aspectToNumber } from '../model/types'
-import type { ShotSize, BodyType, Character } from '../model/types'
+import type { ShotSize, BodyType, Character, Shot } from '../model/types'
+import { shotStarts } from '../core/cutTrack'
 import { PROP_CATALOG, isLightProp } from '../model/defaults'
 import { classifyMove, MOVE_LABELS_JA } from '../core/moveClassifier'
 import { cameraHeightLabel, formatHeightLabel } from '../core/heightLabel'
@@ -434,6 +435,72 @@ function CameraTab() {
   )
 }
 
+// カメラKFの一覧・ジャンプ・削除。タイムラインの◇だけだと「消し方が分からない・
+// Deleteキーはフォーカス次第」になるため、キーボードに依存しない削除導線をここに置く。
+function CamKeySection({ shot, shotIndex }: { shot: Shot; shotIndex: number }) {
+  const st = useStore()
+  const keys = shot.camKeys ?? []
+  const starts = shotStarts(st.project.shots)
+  const shotStart = starts[shotIndex] ?? 0
+  return (
+    <>
+      <div className="section-title">
+        カメラKF{keys.length ? `（${keys.length}）` : ''}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>
+        {keys.length
+          ? 'カット内のカメラワーク。2点以上で再生時にカメラが動きます'
+          : 'このカットはA→Bムーブで動きます。KFを追加するとキーフレーム制御に切り替わります'}
+      </div>
+      <div className="field-row">
+        <button
+          style={{ flex: 1 }}
+          onClick={() => st.addCamKeyframeAtPlayhead(shot.id)}
+          data-testid="camkey-add"
+          title="再生ヘッド位置に、このカットのカメラの現在位置でキーフレームを追加"
+        >◇＋ 再生ヘッド位置に記録</button>
+      </div>
+      {keys.map((k, i) => {
+        const inert = k.tSec > shot.durationSec + 1e-6
+        return (
+          <div key={i} className="field-row" style={{ fontSize: 11, gap: 4 }} data-testid={`camkey-row-${i}`}>
+            <button
+              style={{ width: 64 }}
+              onClick={() => st.scrubTo(shotStart + Math.min(k.tSec, shot.durationSec))}
+              title="この時刻へジャンプ"
+              data-testid={`camkey-jump-${i}`}
+            >⏱ {k.tSec.toFixed(2)}s</button>
+            <span style={{ flex: 1, color: 'var(--text-dim)', overflow: 'hidden', whiteSpace: 'nowrap', opacity: inert ? 0.5 : 1 }}>
+              {Math.round(k.pose.focalLength)}mm
+              {inert && <span style={{ color: 'var(--warn)' }}> ⚠尺外</span>}
+            </span>
+            <button
+              title={k.ease === 'linear' ? '等速（クリックで加減速へ）' : '加減速（クリックで等速へ）'}
+              onClick={() => st.setCamKeyEase(shot.id, i, k.ease === 'linear' ? 'easeInOut' : 'linear')}
+              data-testid={`camkey-ease-${i}`}
+            >{k.ease === 'linear' ? '／' : 'Ｓ'}</button>
+            <button
+              onClick={() => st.removeCamKeyframe(shot.id, i)}
+              title="このキーフレームを削除"
+              data-testid={`camkey-del-${i}`}
+            >✕</button>
+          </div>
+        )
+      })}
+      {keys.length > 0 && (
+        <div className="field-row">
+          <button
+            style={{ flex: 1 }}
+            onClick={() => st.clearCamKeyframes(shot.id)}
+            data-testid="camkey-clear"
+            title="全て削除してA→Bムーブ評価に戻す"
+          >カメラKF全消去</button>
+        </div>
+      )}
+    </>
+  )
+}
+
 function ShotTab() {
   const st = useStore()
   const shot = st.project.shots.find((s) => s.id === st.selectedShotId)
@@ -461,6 +528,9 @@ function ShotTab() {
       <div className="field-row"><label>尺（秒）</label>
         <Num value={shot.durationSec} step={0.5} onChange={(v) => st.updateShot(shot.id, { durationSec: Math.max(0.5, v) })} testid="shot-duration" />
       </div>
+
+      <CamKeySection shot={shot} shotIndex={idx} />
+
       <div className="field-row" style={{ alignItems: 'flex-start' }}><label>ACTION</label>
         <textarea
           rows={2} style={{ flex: 1 }}

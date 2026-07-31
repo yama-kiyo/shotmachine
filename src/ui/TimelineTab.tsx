@@ -50,6 +50,7 @@ export function TimelineTab() {
   const pxRef = useRef(pxPerSec); pxRef.current = pxPerSec
   const snapRef = useRef(snap); snapRef.current = snap
   const scrollRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
 
   const starts = useMemo(() => shotStarts(shots), [shots])
   const contentW = Math.max(total * pxPerSec + PAD_RIGHT, 240)
@@ -81,6 +82,9 @@ export function TimelineTab() {
     opts: { history?: boolean; onMove: (deltaSec: number, ev: PointerEvent) => void; onEnd?: () => void },
   ): void => {
     e.preventDefault(); e.stopPropagation()
+    // preventDefault はブラウザ既定のフォーカス移動も止めてしまう。Delete/←→ を効かせるため
+    // キーボードハンドラを持つルートへ明示的にフォーカスを当てる
+    rootRef.current?.focus()
     const startX = e.clientX
     if (opts.history) useStore.getState().beginTimelineDrag()
     const move = (ev: PointerEvent) => opts.onMove((ev.clientX - startX) / pxRef.current, ev)
@@ -295,6 +299,7 @@ export function TimelineTab() {
     <div
       className="tl-root"
       data-testid="timeline-view"
+      ref={rootRef}
       tabIndex={0}
       onKeyDown={onKeyDown}
       onClick={() => menu && setMenu(null)}
@@ -414,9 +419,15 @@ export function TimelineTab() {
                         inert
                           ? `${k.tSec.toFixed(2)}s（カット尺の外・再生には使われません）`
                           : `カメラKF ${k.tSec.toFixed(2)}s（カット内） / ${Math.round(k.pose.focalLength)}mm`
-                          + '\nドラッグ=時刻変更 / Delete=削除'
+                          + '\nドラッグ=時刻変更 / 右クリックまたはDelete=削除'
                       }
                       onPointerDown={(e) => onCamKeyDown(e, s.id, ki)}
+                      onContextMenu={(e) => {
+                        // ◇の右クリックで即削除（Deleteキーはフォーカス依存で分かりにくいため）
+                        e.preventDefault(); e.stopPropagation()
+                        useStore.getState().removeCamKeyframe(s.id, ki)
+                        setFocus(null)
+                      }}
                     />
                   )
                 }),

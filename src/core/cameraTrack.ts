@@ -96,6 +96,8 @@ export function camKeysHaveMove(keys: CameraKeyframe[] | undefined, durationSec 
 }
 
 // 指定時刻にKFを追加（同時刻±0.05sに既存があれば差し替え）。
+// ease は「同時刻の既存KF → 挿入位置を含む区間のKF」の順で継承する。
+// 継承しないと、linear で組んだ区間の途中にキーを足した瞬間、後半だけ加減速に変わってしまう。
 export function upsertCamKey(
   keys: CameraKeyframe[] | undefined,
   tSec: number,
@@ -103,9 +105,11 @@ export function upsertCamKey(
   ease?: CameraKeyframe['ease'],
 ): CameraKeyframe[] {
   const t = roundT(Math.max(0, tSec))
-  const rest = (keys ?? []).filter((k) => Math.abs(k.tSec - t) > 0.05)
-  const existing = (keys ?? []).find((k) => Math.abs(k.tSec - t) <= 0.05)
-  return normalizeCamKeys([...rest, { tSec: t, pose, ease: ease ?? existing?.ease }])
+  const all = keys ?? []
+  const rest = all.filter((k) => Math.abs(k.tSec - t) > 0.05)
+  const existing = all.find((k) => Math.abs(k.tSec - t) <= 0.05)
+  const seg = [...all].reverse().find((k) => k.tSec <= t + EPS)
+  return normalizeCamKeys([...rest, { tSec: t, pose, ease: ease ?? existing?.ease ?? seg?.ease }])
 }
 
 // KFの時刻変更（[0, durationSec] 内クランプ＋再整列）。適用後の実時刻を返す。
@@ -164,7 +168,24 @@ export function splitCamKeys(
   return { left: normalizeCamKeys(left), right: normalizeCamKeys(right) }
 }
 
-// カット結合: right の tSec に leftDur を加算して連結。境界の重複KF（±0.05s）は1個に畳む。
+export function samePose(a: CameraPose, b: CameraPose): boolean {
+  return (
+    Math.abs(a.position.x - b.position.x) <= 1e-4 &&
+    Math.abs(a.position.y - b.position.y) <= 1e-4 &&
+    Math.abs(a.position.z - b.position.z) <= 1e-4 &&
+    Math.abs(a.lookAt.x - b.lookAt.x) <= 1e-4 &&
+    Math.abs(a.lookAt.y - b.lookAt.y) <= 1e-4 &&
+    Math.abs(a.lookAt.z - b.lookAt.z) <= 1e-4 &&
+    Math.abs(a.roll - b.roll) <= 1e-4 &&
+    Math.abs(a.focalLength - b.focalLength) <= 1e-4
+  )
+}
+
+// カット結合: right の tSec に leftDur を加算して連結。
+// 境界（左の末尾と右の先頭）が同時刻に来たとき:
+//   - ポーズが同じ  → 1個に畳む（分割したものを戻した場合。モーションは完全に連続）
+//   - ポーズが違う  → 右を 0.01s ずらして両方残す（別カット同士の結合。左のカメラワークを
+//                     黙って捨てないため。境界は元のカットチェンジに相当する素早い移り変わりになる）
 export function mergeCamKeys(
   leftKeys: CameraKeyframe[] | undefined,
   leftDur: number,
@@ -173,5 +194,9 @@ export function mergeCamKeys(
   const l = leftKeys ?? []
   const r = (rightKeys ?? []).map((k) => ({ ...k, tSec: roundT(k.tSec + leftDur) }))
   if (!l.length && !r.length) return undefined
+  const lastL = l[l.length - 1]
+  if (lastL && r.length && Math.abs(lastL.tSec - r[0].tSec) <= 0.005 && !samePose(lastL.pose, r[0].pose)) {
+    r[0] = { ...r[0], tSec: roundT(r[0].tSec + 0.01) }
+  }
   return normalizeCamKeys([...l, ...r])
 }

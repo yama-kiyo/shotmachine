@@ -85,6 +85,57 @@ test.describe('ショットマシン 主要フロー', () => {
     expect(label).toBe('Dan')
   })
 
+  test('フリーカメラは移動しても向きを保つ（見えない中心点を向かない）', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    const poseOf = () => page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      const c = st.project.scene.cameras.find((x: any) => x.id === st.selection.id)
+      return { p: c.pose.position, l: c.pose.lookAt }
+    })
+    const before = await poseOf()
+    // ギズモ相当の移動（TransformControls の書き戻しと同じアクション）
+    await page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      const c = st.project.scene.cameras.find((x: any) => x.id === st.selection.id)
+      st.dragCameraPosition(c.id, { x: c.pose.position.x + 2, y: c.pose.position.y + 1, z: c.pose.position.z + 3 })
+    })
+    const after = await poseOf()
+    // 注視点も同じ量だけ動く＝向き（position→lookAt ベクトル）が保存される
+    expect(after.l.x - before.l.x).toBeCloseTo(2, 3)
+    expect(after.l.y - before.l.y).toBeCloseTo(1, 3)
+    expect(after.l.z - before.l.z).toBeCloseTo(3, 3)
+    const dirBefore = { x: before.l.x - before.p.x, y: before.l.y - before.p.y, z: before.l.z - before.p.z }
+    const dirAfter = { x: after.l.x - after.p.x, y: after.l.y - after.p.y, z: after.l.z - after.p.z }
+    expect(dirAfter.x).toBeCloseTo(dirBefore.x, 3)
+    expect(dirAfter.y).toBeCloseTo(dirBefore.y, 3)
+    expect(dirAfter.z).toBeCloseTo(dirBefore.z, 3)
+  })
+
+  test('カメラは回転で向きを変えられる（注視点までの距離は維持）', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    const read = () => page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      const c = st.project.scene.cameras.find((x: any) => x.id === st.selection.id)
+      const d = Math.hypot(
+        c.pose.lookAt.x - c.pose.position.x,
+        c.pose.lookAt.y - c.pose.position.y,
+        c.pose.lookAt.z - c.pose.position.z,
+      )
+      return { lookAt: c.pose.lookAt, dist: d }
+    })
+    const before = await read()
+    await page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      const c = st.project.scene.cameras.find((x: any) => x.id === st.selection.id)
+      st.dragCameraOrientation(c.id, { x: 1, y: 0, z: 0 }) // 真横（+X）を向かせる
+    })
+    const after = await read()
+    expect(after.dist).toBeCloseTo(before.dist, 3) // 距離は維持
+    expect(Math.abs(after.lookAt.x - before.lookAt.x)).toBeGreaterThan(0.5) // 向きは変わる
+  })
+
   test('フリーのカメラはサイズ合わせに縛られず手動で動かせる', async ({ page }) => {
     await waitForApp(page)
     await page.getByTestId('outliner-cam-CAM-A').click()
@@ -269,10 +320,15 @@ test.describe('ショットマシン 主要フロー', () => {
     await page.getByTestId('outliner-cam-CAM-C').click()
     const posY = page.getByTestId('cam-pos-y')
     const before = parseFloat(await posY.inputValue())
-    // チャットタブでキー設定→送信
+    // チャットタブへ。キー入力画面は「.env に VITE_ANTHROPIC_API_KEY があるとスキップされる」ので、
+    // 開発環境の .env 有無に左右されないよう、画面が出た場合だけ入力する
     await page.getByTestId('tab-chat').click()
-    await page.getByTestId('api-key-input').fill('sk-ant-test-mock-key')
-    await page.getByTestId('api-key-save').click()
+    const keyInput = page.getByTestId('api-key-input')
+    if (await keyInput.isVisible().catch(() => false)) {
+      await keyInput.fill('sk-ant-test-mock-key')
+      await page.getByTestId('api-key-save').click()
+    }
+    await expect(page.getByTestId('chat-input')).toBeVisible()
     await page.getByTestId('chat-input').fill('もっとローアングルにして')
     await page.getByTestId('chat-send').click()
     // アシスタントの応答（モック2回目のテキスト）を待つ

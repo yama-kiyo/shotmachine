@@ -26,10 +26,21 @@ function CameraGizmo({ cam, status }: { cam: CameraRig; status: 'ok' | 'crossed'
   )
   const p: [number, number, number] = [cam.pose.position.x, cam.pose.position.y, cam.pose.position.z]
   const framePoints = [...corners, corners[0]]
+  // カメラ本体に実際の向きを持たせる（-Zが前方＝THREE.Object3D.lookAt と同じ規約）。
+  // これがないと回転ギズモを掴んだ瞬間に向きが飛ぶ
+  const quat = useMemo(() => {
+    const m = new THREE.Matrix4()
+    m.lookAt(
+      new THREE.Vector3(cam.pose.position.x, cam.pose.position.y, cam.pose.position.z),
+      new THREE.Vector3(cam.pose.lookAt.x, cam.pose.lookAt.y, cam.pose.lookAt.z),
+      new THREE.Vector3(0, 1, 0),
+    )
+    return new THREE.Quaternion().setFromRotationMatrix(m)
+  }, [cam.pose])
   return (
     <group>
       {/* カメラ本体（ギズモのアタッチ対象。name=cam.id） */}
-      <group name={cam.id} position={p} userData={{ entityType: 'camera', id: cam.id }}>
+      <group name={cam.id} position={p} quaternion={quat} userData={{ entityType: 'camera', id: cam.id }}>
         <mesh
           onPointerDown={(e) => { e.stopPropagation(); select({ type: 'camera', id: cam.id }) }}
         >
@@ -188,15 +199,19 @@ function SelectionGizmo() {
   objRef.current = target
   if (!target || !selection) return null
   const isCamera = selection.type === 'camera'
-  const mode = isCamera ? 'translate' : gizmoMode
+  // カメラも回転ギズモを使えるようにする（旧実装は translate 固定で、向きを変える手段が無かった）。
+  // キャラ/プロップの回転は接地前提でY軸のみ、カメラはパン(Y)＋ティルト(X)。
+  // ロール(Z)はカメラタブの数値入力が正なのでギズモには出さない。
+  const mode = gizmoMode
+  const isRotate = mode === 'rotate'
   return (
     <TransformControls
       object={target}
       mode={mode}
       size={0.7}
-      showX={mode === 'rotate' ? false : true}
-      showZ={mode === 'rotate' ? false : true}
-      showY={mode === 'rotate' ? true : true}
+      showX={isRotate ? isCamera : true}
+      showZ={isRotate ? false : true}
+      showY={true}
       onMouseDown={() => {
         const st = useStore.getState()
         if (selection.type === 'character') {
@@ -224,10 +239,13 @@ function SelectionGizmo() {
             position: { x: o.position.x, y: o.position.y, z: o.position.z },
             rotationY: o.rotation.y,
           })
+        } else if (isRotate) {
+          // 回転: カメラの前方（-Z）を向き直す。注視点までの距離は維持される
+          const f = new THREE.Vector3(0, 0, -1).applyQuaternion(o.quaternion)
+          st.dragCameraOrientation(selection.id, { x: f.x, y: f.y, z: f.z })
         } else {
-          st.updateCameraPose(selection.id, {
-            position: { x: o.position.x, y: o.position.y, z: o.position.z },
-          })
+          // 移動: 三脚ごと動かす＝向きを保ったまま平行移動（注視点も一緒に動く）
+          st.dragCameraPosition(selection.id, { x: o.position.x, y: o.position.y, z: o.position.z })
         }
       }}
     />

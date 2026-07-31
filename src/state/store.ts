@@ -3,13 +3,13 @@ import { immer } from 'zustand/middleware/immer'
 import { temporal } from 'zundo'
 import type {
   Project, Character, Prop, PropKind, CameraRig, CameraPose, Shot, ShotSize, AspectRatio,
-  RoomSpec, TimeOfDay, DialogueClip, Alignment,
+  RoomSpec, TimeOfDay, DialogueClip, Alignment, CameraKeyframe,
 } from '../model/types'
 import { upsertKeyframe } from '../core/charAnim'
 import { emotionToArmPose } from '../core/emotionToArmPose'
 import { aspectToNumber } from '../model/types'
 import { sampleProject, emptyProject, makeCharacter, makeProp, makeCamera, genId, LOCATION_TEMPLATES, PROP_CATALOG } from '../model/defaults'
-import { v3 } from '../core/math'
+import { v3, add, sub, scale, normalize, length, distance, rad } from '../core/math'
 import {
   shotStarts, roundTime, rollBoundary, rippleBoundary, splitShot, mergeShots, clampClip,
   shotAtTime as cutShotAtTime,
@@ -81,13 +81,68 @@ function scheduleShotAutoSync(cameraId: string): void {
   }, 600)
 }
 
+// camKeys カットのサムネイルを先頭KF/末尾KFで撮り直す（デバウンス0.4秒）。
+// camKeys 制御下のカットは scheduleShotAutoSync の対象外なので、ここで撮らないと
+// サムネが「KF化する前の最後のリグ位置」で凍結し、絵コンテPNG/PDF・ショット一覧が再生と食い違う。
+// ドラッグ中に毎フレーム撮ると重いためデバウンスする。
+const pendingThumbShotIds = new Set<string>()
+let camKeyThumbTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleCamKeyThumbSync(shotId: string): void {
+  pendingThumbShotIds.add(shotId)
+  if (camKeyThumbTimer) clearTimeout(camKeyThumbTimer)
+  camKeyThumbTimer = setTimeout(() => {
+    const ids = new Set(pendingThumbShotIds)
+    pendingThumbShotIds.clear()
+    if (!captureFn) return
+    const st = useStore.getState()
+    const ar = aspectToNumber(st.project.aspect)
+    const updates: Array<{ id: string; thumbnail: string; thumbnailB?: string }> = []
+    for (const id of ids) {
+      const shot = st.project.shots.find((s) => s.id === id)
+      if (!shot?.camKeys?.length) continue
+      const act = activeCamKeys(shot.camKeys, shot.durationSec)
+      updates.push({
+        id,
+        thumbnail: captureFn(act[0].pose, ar),
+        thumbnailB: act.length >= 2 ? captureFn(act[act.length - 1].pose, ar) : undefined,
+      })
+    }
+    if (!updates.length) return
+    useStore.setState((s) => {
+      for (const u of updates) {
+        const t = s.project.shots.find((x) => x.id === u.id)
+        if (!t) continue
+        t.thumbnail = u.thumbnail
+        t.thumbnailB = u.thumbnailB
+      }
+    })
+  }, 400)
+}
+
+// カットの実効カメラワークをKF列として取り出す。camKeys があればそれ、無ければ従来の
+// A/Bムーブ（ライブリンク・moveRange窓込み）を2キーへ変換したもの。
+// 「camKeysあり」と「なし」のカットを結合するときに、無い側のムーブを失わないために使う。
+function asCamKeys(shot: Shot, cameras: CameraRig[]): CameraKeyframe[] {
+  if (shot.camKeys?.length) return shot.camKeys
+  const a = shotPoseAtLocal(shot, cameras, 0)
+  const b = shotHasMove(shot, cameras) ? shotPoseAtLocal(shot, cameras, shot.durationSec) : null
+  return camKeysFromAB(
+    JSON.parse(JSON.stringify(a ?? shot.poseSnapshot.a)),
+    b ? JSON.parse(JSON.stringify(b)) : null,
+    shot.durationSec,
+  )
+}
+
+// 尺が変わると inert 境界（KFが尺の外へ出る/戻る）が動くため、camKeys カットの派生キャッシュを
+// 引き直す。これを怠ると再生（尺で正しくクリップ）と絵コンテ/CSV/プロンプトが食い違う。
+function resyncCamKeyShots(shots: Shot[], cameras: CameraRig[]): void {
+  for (const s of shots) if (s.camKeys?.length) recalcMoveType(s, cameras)
+}
+
 // camKeys を「カメラワークの正本」として、そこから派生する Shot 上のフィールドを揃える。
-//
 // poseSnapshot / focalLength / moveType は、絵コンテPNG・PDF・ショットリストCSV・
 // AIプロンプト出力（promptGen）が参照する“派生キャッシュ”。ここを同期しておかないと、
 // 再生だけカメラが動いて書き出し系が全部 'Static' のまま取り残される（＝今回の不具合の本体）。
-//
-// 3キー以上で隣接区間の分類が2種類以上に割れる場合は 'Compound'（複合ムーブ）とする。
 function recalcMoveType(shot: Shot, cameras: CameraRig[]): void {
   if (shot.camKeys?.length) {
     const act = activeCamKeys(shot.camKeys, shot.durationSec)
@@ -104,7 +159,11 @@ function recalcMoveType(shot: Shot, cameras: CameraRig[]): void {
       .map((k, i) => classifyMove(k.pose, act[i + 1].pose))
       .filter((m) => m !== 'Static')
     const kinds = new Set(segs)
-    shot.moveType = kinds.size >= 2 ? 'Compound' : classifyMove(head.pose, tail.pose)
+    const overall = classifyMove(head.pose, tail.pose)
+    // 「行って戻る」（パン往復・一周アーク）は head≈tail のため overall が Static になるが、
+    // 途中で確かに動いている。ここを Static にすると絵コンテ矢印が消え、AIプロンプトが
+    // 'static camera, locked off' を出してしまう。区間に動きがあれば必ず動きとして扱う。
+    shot.moveType = kinds.size >= 2 || (segs.length > 0 && overall === 'Static') ? 'Compound' : overall
     return
   }
   const a = shotPoseAtLocal(shot, cameras, 0)
@@ -206,6 +265,8 @@ interface ShotmachineState {
   // カット編集（タイムライン）
   rollCutBoundary: (boundaryIdx: number, deltaSec: number) => void
   rippleCutBoundary: (boundaryIdx: number, deltaSec: number) => void
+  dragCameraPosition: (id: string, position: Vec3) => void
+  dragCameraOrientation: (id: string, forward: Vec3) => void
   setCameraFrameTarget: (cameraId: string, charId: string | null) => void
   splitShotAtPlayhead: () => void
   mergeShotWithNext: (shotId: string) => void
@@ -213,6 +274,7 @@ interface ShotmachineState {
   addCamKeyframeAtPlayhead: (shotId?: string) => void
   moveCamKeyframe: (shotId: string, index: number, tSec: number) => void
   removeCamKeyframe: (shotId: string, index: number) => void
+  setCamKeyEase: (shotId: string, index: number, ease: 'linear' | 'easeInOut') => void
   clearCamKeyframes: (shotId: string) => void
   reassignShotCamera: (shotId: string, cameraId: string) => void
   moveClip: (clipId: string, newStartSec: number) => void
@@ -697,6 +759,41 @@ export const useStore = create<ShotmachineState>()(
     },
 
     // フレーミング対象の切り替え（null=フリー）。フリーはカメラを完全手動で扱うモード
+    // ギズモの移動: カメラは「三脚ごと移動」＝向きを保ったまま平行移動する。
+    // 旧実装は position だけ更新して lookAt を据え置いたため、初期の注視点（原点付近 0,1.2,0）を
+    // 永久に向き続け、どこへ動かしても見えない中心点を睨む挙動になっていた。
+    dragCameraPosition: (id, position) =>
+      set((st) => {
+        const c = st.project.scene.cameras.find((c) => c.id === id)
+        if (!c) return
+        const d = sub(position, c.pose.position)
+        c.pose.position = position
+        c.pose.lookAt = add(c.pose.lookAt, d)
+        scheduleShotAutoSync(id)
+      }),
+    // ギズモの回転: 前方ベクトル（正規化済み）から注視点を引き直す。被写体までの距離は維持する
+    dragCameraOrientation: (id, forward) =>
+      set((st) => {
+        const c = st.project.scene.cameras.find((c) => c.id === id)
+        if (!c) return
+        // normalize はゼロベクトルに (0,0,1) を返すため、正規化する前に弾く
+        if (length(forward) < 1e-9) return
+        const n = normalize(forward)
+        // ほぼ真上/真下を向くと、up=+Y 前提の lookAt 行列が特異になり画がロールして暴れる。
+        // ティルトを±89°相当でクランプする
+        const MAX_TILT = Math.sin(rad(89))
+        const f = Math.abs(n.y) > MAX_TILT
+          ? normalize(v3(
+              n.x || 1e-4,
+              Math.sign(n.y) * MAX_TILT,
+              n.z,
+            ))
+          : n
+        const dist = Math.max(distance(c.pose.position, c.pose.lookAt), 0.5)
+        c.pose.lookAt = add(c.pose.position, scale(f, dist))
+        scheduleShotAutoSync(id)
+      }),
+
     setCameraFrameTarget: (cameraId, charId) =>
       set((st) => {
         const c = st.project.scene.cameras.find((c) => c.id === cameraId)
@@ -813,18 +910,25 @@ export const useStore = create<ShotmachineState>()(
     updateShot: (id, patch) =>
       set((st) => {
         const s = st.project.shots.find((s) => s.id === id)
-        if (s) Object.assign(s, patch)
+        if (!s) return
+        Object.assign(s, patch)
+        // 尺変更は inert 境界を動かすので派生キャッシュを引き直す
+        if (patch.durationSec !== undefined && s.camKeys?.length) {
+          recalcMoveType(s, st.project.scene.cameras)
+        }
       }),
 
     // 境界ロール: 左+δ/右−δ（合計不変）。音声との対応が崩れないタイムラインの既定操作
     rollCutBoundary: (boundaryIdx, deltaSec) =>
       set((st) => {
         st.project.shots = rollBoundary(st.project.shots, boundaryIdx, deltaSec)
+        resyncCamKeyShots(st.project.shots, st.project.scene.cameras)
       }),
     // 境界リップル: 左カットのみ伸縮、以降は累積で後方シフト。総尺が変わるためクリップを再クランプ
     rippleCutBoundary: (boundaryIdx, deltaSec) =>
       set((st) => {
         st.project.shots = rippleBoundary(st.project.shots, boundaryIdx, deltaSec)
+        resyncCamKeyShots(st.project.shots, st.project.scene.cameras)
         const total = st.project.shots.reduce((a, s) => a + s.durationSec, 0)
         st.project.audioTrack = clampClipsToTotal(st.project.audioTrack, total)
       }),
@@ -865,9 +969,15 @@ export const useStore = create<ShotmachineState>()(
         if (idx < 0 || idx >= st.project.shots.length - 1) return
         const left = st.project.shots[idx]
         const right = st.project.shots[idx + 1]
-        // camKeys は右カットの時刻を左カット尺だけ後ろへずらして連結（境界の重複は畳まれる）
+        // camKeys は右カットの時刻を左カット尺だけ後ろへずらして連結（境界の重複は畳まれる）。
+        // 片側だけがKF制御の場合、もう一方のA→BムーブもKF化してから繋ぐ。
+        // そうしないと KF を持たない側のカメラワークが黙って消える
         const mergedKeys = left.camKeys?.length || right.camKeys?.length
-          ? mergeCamKeys(left.camKeys, left.durationSec, right.camKeys)
+          ? mergeCamKeys(
+              asCamKeys(left, st.project.scene.cameras),
+              left.durationSec,
+              asCamKeys(right, st.project.scene.cameras),
+            )
           : undefined
         st.project.shots = mergeShots(st.project.shots, idx)
         const merged = st.project.shots[idx]
@@ -897,18 +1007,11 @@ export const useStore = create<ShotmachineState>()(
       set((st) => {
         const shot = st.project.shots[at.idx]
         const cams = st.project.scene.cameras
-        let keys = shot.camKeys
-        if (!keys?.length) {
-          const startPose = shotPoseAtLocal(shot, cams, 0)
-          const endPose = shotHasMove(shot, cams) ? shotPoseAtLocal(shot, cams, shot.durationSec) : null
-          keys = camKeysFromAB(
-            JSON.parse(JSON.stringify(startPose ?? pose)),
-            endPose ? JSON.parse(JSON.stringify(endPose)) : null,
-            shot.durationSec,
-          )
-        }
-        shot.camKeys = upsertCamKey(keys, tSec, pose)
+        // camKeys が空なら、まず従来のA→BムーブをKF化してから追加する
+        // （最初の1キーを打った瞬間に、組んであったムーブが消えないように）
+        shot.camKeys = upsertCamKey(asCamKeys(shot, cams), tSec, pose)
         recalcMoveType(shot, cams)
+        scheduleCamKeyThumbSync(shot.id)
         st.animScrub = true
         st.toast = `カメラKFを記録しました（カット内 ${tSec.toFixed(2)}秒 / 計${shot.camKeys.length}キー）`
       })
@@ -922,6 +1025,7 @@ export const useStore = create<ShotmachineState>()(
         const r = moveCamKey(shot.camKeys, index, tSec, shot.durationSec)
         shot.camKeys = r.keys
         recalcMoveType(shot, st.project.scene.cameras)
+        scheduleCamKeyThumbSync(shot.id)
         st.playTime = roundTime(shotStarts(st.project.shots)[idx] + r.tSec)
         st.animScrub = true
       }),
@@ -931,6 +1035,16 @@ export const useStore = create<ShotmachineState>()(
         if (!shot?.camKeys) return
         shot.camKeys = removeCamKey(shot.camKeys, index)
         recalcMoveType(shot, st.project.scene.cameras)
+        if (shot.camKeys?.length) scheduleCamKeyThumbSync(shot.id)
+        st.animScrub = true
+      }),
+    // 区間の補間カーブ切替（そのKFから次のKFまで）。linear=等速 / easeInOut=加減速
+    setCamKeyEase: (shotId, index, ease) =>
+      set((st) => {
+        const shot = st.project.shots.find((s) => s.id === shotId)
+        const kf = shot?.camKeys?.[index]
+        if (!kf) return
+        kf.ease = ease
         st.animScrub = true
       }),
     // 全消去 → 従来のA/Bムーブ評価に戻る
@@ -955,6 +1069,14 @@ export const useStore = create<ShotmachineState>()(
         if (!shot) return
         shot.cameraId = cam.id
         shot.cameraName = cam.name
+        // camKeys カットはKFがポーズの実体を持つ。差し替えてもカメラワークは維持され、
+        // 派生キャッシュ（焦点距離・サムネ）もリグではなくKF基準で引き直す
+        if (shot.camKeys?.length) {
+          recalcMoveType(shot, st.project.scene.cameras)
+          scheduleCamKeyThumbSync(shot.id)
+          st.toast = `カットを ${cam.name} に差し替えました（カメラKFは維持されます）`
+          return
+        }
         shot.focalLength = cam.pose.focalLength
         // script カットはライブリンクのまま（poseSnapshotは触らない）、capture カットは新ポーズを凍結
         if (shot.source !== 'script') {

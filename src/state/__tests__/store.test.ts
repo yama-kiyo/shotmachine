@@ -227,3 +227,136 @@ describe('store: writeCharKeyframeFromGizmo', () => {
     expect(kfs[0].armPose).toBe('crossed')
   })
 })
+
+// ---- カメラKF（camKeys）: 派生キャッシュ同期と結合/分割の統合 ----
+// Fableレビュー（2026-08-01）で指摘された store 層の穴に対する回帰テスト。
+const cpose = (x: number, focal = 35): CameraPose => ({
+  position: v3(x, 1.5, 3), lookAt: v3(0, 1.2, 0), roll: 0, focalLength: focal,
+})
+
+describe('store: カメラKFの派生キャッシュ同期', () => {
+  it('KFを追加すると poseSnapshot / focalLength / moveType が先頭・末尾KFへ同期される', () => {
+    load({
+      shots: [shot('a', 4, {
+        camKeys: [{ tSec: 0, pose: cpose(0, 24) }, { tSec: 4, pose: cpose(10, 80) }],
+      })],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    // 尺変更経路を通すと再同期が走る
+    useStore.getState().updateShot('a', { durationSec: 4 })
+    const s = useStore.getState().project.shots[0]
+    expect(s.poseSnapshot.a.position.x).toBeCloseTo(0)
+    expect(s.poseSnapshot.b?.position.x).toBeCloseTo(10)
+    expect(s.focalLength).toBeCloseTo(24)
+    expect(s.moveType).not.toBe('Static')
+  })
+
+  it('「行って戻る」ムーブが Static にならない（先頭≈末尾でも Compound）', () => {
+    load({
+      shots: [shot('a', 4, {
+        camKeys: [{ tSec: 0, pose: cpose(0) }, { tSec: 2, pose: cpose(9) }, { tSec: 4, pose: cpose(0) }],
+      })],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().updateShot('a', { durationSec: 4 })
+    expect(useStore.getState().project.shots[0].moveType).toBe('Compound')
+  })
+
+  it('尺を縮めてKFが尺外へ出ると、派生キャッシュも縮んだ尺で引き直される', () => {
+    load({
+      shots: [shot('a', 4, {
+        camKeys: [{ tSec: 0, pose: cpose(0) }, { tSec: 3, pose: cpose(30) }],
+      })],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().updateShot('a', { durationSec: 1 })
+    const s = useStore.getState().project.shots[0]
+    // 3秒のKFは尺外＝評価対象外。動きなし扱いになる
+    expect(s.poseSnapshot.b).toBeUndefined()
+    expect(s.moveType).toBe('Static')
+    // 非破壊: KF自体は残っている
+    expect(s.camKeys).toHaveLength(2)
+  })
+})
+
+describe('store: カメラKFの結合', () => {
+  it('片側だけKF制御のカットを結合しても、もう一方のムーブが消えない', () => {
+    load({
+      shots: [
+        // 左: 従来のA→Bムーブ（KFなし）
+        shot('a', 2, { poseSnapshot: { a: cpose(0), b: cpose(20) } }),
+        // 右: KF制御
+        shot('b', 2, { camKeys: [{ tSec: 0, pose: cpose(50) }, { tSec: 2, pose: cpose(60) }] }),
+      ],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().mergeShotWithNext('a')
+    const m = useStore.getState().project.shots[0]
+    expect(m.durationSec).toBeCloseTo(4)
+    const keys = m.camKeys!
+    // 左のA→B（0→20）がKF化されて残り、右（50→60）が後ろへ連結される
+    expect(keys.length).toBeGreaterThanOrEqual(3)
+    expect(keys[0].pose.position.x).toBeCloseTo(0)
+    expect(keys[keys.length - 1].pose.position.x).toBeCloseTo(60)
+    expect(keys[keys.length - 1].tSec).toBeCloseTo(4)
+    // 左側の動きが残っている（途中に20付近のKFがある）
+    expect(keys.some((k) => Math.abs(k.pose.position.x - 20) < 1e-6)).toBe(true)
+  })
+
+  it('両方KFなしの結合では camKeys を生やさない（従来挙動のまま）', () => {
+    load({
+      shots: [shot('a', 2), shot('b', 2)],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().mergeShotWithNext('a')
+    expect(useStore.getState().project.shots[0].camKeys).toBeUndefined()
+  })
+})
+
+describe('store: カメラ操作（フリー）', () => {
+  it('dragCameraPosition は向きを保ったまま平行移動する（注視点も同じ量動く）', () => {
+    load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
+    const before = useStore.getState().project.scene.cameras[0].pose
+    const dir = {
+      x: before.lookAt.x - before.position.x,
+      y: before.lookAt.y - before.position.y,
+      z: before.lookAt.z - before.position.z,
+    }
+    useStore.getState().dragCameraPosition('cam1', v3(2, 2.5, 5))
+    const after = useStore.getState().project.scene.cameras[0].pose
+    expect(after.lookAt.x - after.position.x).toBeCloseTo(dir.x)
+    expect(after.lookAt.y - after.position.y).toBeCloseTo(dir.y)
+    expect(after.lookAt.z - after.position.z).toBeCloseTo(dir.z)
+  })
+
+  it('dragCameraOrientation は注視点までの距離を保って向きだけ変える', () => {
+    load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
+    const p0 = useStore.getState().project.scene.cameras[0].pose
+    const d0 = Math.hypot(p0.lookAt.x - p0.position.x, p0.lookAt.y - p0.position.y, p0.lookAt.z - p0.position.z)
+    useStore.getState().dragCameraOrientation('cam1', v3(1, 0, 0))
+    const p1 = useStore.getState().project.scene.cameras[0].pose
+    const d1 = Math.hypot(p1.lookAt.x - p1.position.x, p1.lookAt.y - p1.position.y, p1.lookAt.z - p1.position.z)
+    expect(d1).toBeCloseTo(d0, 6)
+    expect(p1.lookAt.x - p1.position.x).toBeCloseTo(d0, 6) // +X を向いた
+  })
+
+  it('ゼロベクトルを渡しても注視点が壊れない', () => {
+    load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
+    const before = { ...useStore.getState().project.scene.cameras[0].pose.lookAt }
+    useStore.getState().dragCameraOrientation('cam1', v3(0, 0, 0))
+    expect(useStore.getState().project.scene.cameras[0].pose.lookAt).toEqual(before)
+  })
+})
+
+describe('store: カメラ回転の特異姿勢クランプ', () => {
+  it('真下を向かせてもティルトが±89°でクランプされ、注視点が破綻しない', () => {
+    load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
+    useStore.getState().dragCameraOrientation('cam1', v3(0, -1, 0))
+    const p = useStore.getState().project.scene.cameras[0].pose
+    const d = Math.hypot(p.lookAt.x - p.position.x, p.lookAt.y - p.position.y, p.lookAt.z - p.position.z)
+    const dy = (p.lookAt.y - p.position.y) / d
+    expect(Number.isFinite(d)).toBe(true)
+    expect(Math.abs(dy)).toBeLessThan(1) // 完全な真下(=-1)にはならない
+    expect(dy).toBeLessThan(-0.9) // ほぼ真下は向く
+  })
+})

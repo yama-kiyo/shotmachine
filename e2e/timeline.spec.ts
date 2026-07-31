@@ -228,4 +228,72 @@ test.describe('カメラキーフレーム', () => {
     await page.getByTestId('timeline-view').press('Delete')
     await expect(page.getByTestId('tl-camkey-0-0')).toHaveCount(0)
   })
+
+  // 削除導線は3つある。キーボードフォーカスに依存しない経路を必ず確保する
+  test('◇をクリックしただけでキーボード操作が効く（フォーカスが乗る）', async ({ page }) => {
+    await importSampleAndOpenTimeline(page)
+    await page.evaluate(() => (window as any).useStore.getState().scrubTo(0.05))
+    await page.getByTestId('tl-addcamkf').click()
+    // クリックのみ（明示フォーカスなし）→ そのままDeleteが通る
+    await page.getByTestId('tl-camkey-0-0').click()
+    await page.keyboard.press('Delete')
+    await expect(page.getByTestId('tl-camkey-0-0')).toHaveCount(0)
+  })
+
+  test('◇を右クリックで削除できる', async ({ page }) => {
+    await importSampleAndOpenTimeline(page)
+    await page.evaluate(() => (window as any).useStore.getState().scrubTo(0.05))
+    await page.getByTestId('tl-addcamkf').click()
+    await expect(page.getByTestId('tl-camkey-0-0')).toBeVisible()
+    await page.getByTestId('tl-camkey-0-0').click({ button: 'right' })
+    await expect(page.getByTestId('tl-camkey-0-0')).toHaveCount(0)
+  })
+
+  test('右パネルのカメラKF一覧から個別削除・全消去ができる', async ({ page }) => {
+    await importSampleAndOpenTimeline(page)
+    // 2キー打つ
+    await page.evaluate(() => (window as any).useStore.getState().scrubTo(0.05))
+    await page.getByTestId('tl-addcamkf').click()
+    const cutDur = await page.evaluate(() => (window as any).useStore.getState().project.shots[0].durationSec)
+    await page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      st.updateCameraPose(st.project.shots[0].cameraId, { position: { x: 3, y: 1.5, z: 3 } })
+    })
+    await page.evaluate((d) => (window as any).useStore.getState().scrubTo(d - 0.05), cutDur)
+    await page.getByTestId('tl-addcamkf').click()
+
+    // 右パネルのショットタブに一覧が出る
+    await page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      st.selectShot(st.project.shots[0].id)
+    })
+    await expect(page.getByTestId('camkey-row-0')).toBeVisible()
+    await expect(page.getByTestId('camkey-row-1')).toBeVisible()
+
+    // 個別削除
+    await page.getByTestId('camkey-del-1').click()
+    await expect(page.getByTestId('camkey-row-1')).toHaveCount(0)
+    await expect(page.getByTestId('camkey-row-0')).toBeVisible()
+
+    // 全消去 → camKeys が落ちてA→Bムーブ評価へ戻る
+    await page.getByTestId('camkey-clear').click()
+    await expect(page.getByTestId('camkey-row-0')).toHaveCount(0)
+    const camKeys = await page.evaluate(() => (window as any).useStore.getState().project.shots[0].camKeys)
+    expect(camKeys).toBeFalsy()
+  })
+
+  test('イージングを等速／加減速で切り替えられる', async ({ page }) => {
+    await importSampleAndOpenTimeline(page)
+    await page.evaluate(() => (window as any).useStore.getState().scrubTo(0.05))
+    await page.getByTestId('tl-addcamkf').click()
+    await page.evaluate(() => {
+      const st = (window as any).useStore.getState()
+      st.selectShot(st.project.shots[0].id)
+    })
+    const easeOf = () => page.evaluate(() => (window as any).useStore.getState().project.shots[0].camKeys[0].ease)
+    await page.getByTestId('camkey-ease-0').click()
+    expect(await easeOf()).toBe('linear')
+    await page.getByTestId('camkey-ease-0').click()
+    expect(await easeOf()).toBe('easeInOut')
+  })
 })
