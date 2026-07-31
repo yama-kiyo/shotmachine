@@ -99,12 +99,16 @@ function scheduleCamKeyThumbSync(shotId: string): void {
     const updates: Array<{ id: string; thumbnail: string; thumbnailB?: string }> = []
     for (const id of ids) {
       const shot = st.project.shots.find((s) => s.id === id)
-      if (!shot?.camKeys?.length) continue
-      const act = activeCamKeys(shot.camKeys, shot.durationSec)
+      if (!shot) continue
+      // camKeys があれば先頭/末尾KF、無ければ（＝全消去直後など）実効A/Bポーズで撮り直す
+      const head = shotPoseAtLocal(shot, st.project.scene.cameras, 0)
+      const hasMove = shotHasMove(shot, st.project.scene.cameras)
+      const tail = hasMove ? shotPoseAtLocal(shot, st.project.scene.cameras, shot.durationSec) : null
+      if (!head) continue
       updates.push({
         id,
-        thumbnail: captureFn(act[0].pose, ar),
-        thumbnailB: act.length >= 2 ? captureFn(act[act.length - 1].pose, ar) : undefined,
+        thumbnail: captureFn(head, ar),
+        thumbnailB: tail ? captureFn(tail, ar) : undefined,
       })
     }
     if (!updates.length) return
@@ -166,8 +170,18 @@ function recalcMoveType(shot: Shot, cameras: CameraRig[]): void {
     shot.moveType = kinds.size >= 2 || (segs.length > 0 && overall === 'Static') ? 'Compound' : overall
     return
   }
+  // camKeys なし（＝従来のA/B評価へ戻った直後を含む）。moveType だけでなく poseSnapshot /
+  // focalLength も実効ポーズで引き直す。KFを全消去した直後に旧KF由来の値が残ると、
+  // 再生はライブリグ、書き出しは消したKFの値、という食い違いになる
   const a = shotPoseAtLocal(shot, cameras, 0)
   const b = shotHasMove(shot, cameras) ? shotPoseAtLocal(shot, cameras, shot.durationSec) : null
+  if (a) {
+    shot.poseSnapshot = {
+      a: JSON.parse(JSON.stringify(a)),
+      b: b ? JSON.parse(JSON.stringify(b)) : undefined,
+    }
+    shot.focalLength = a.focalLength
+  }
   shot.moveType = a && b ? classifyMove(a, b) : 'Static'
 }
 
@@ -780,15 +794,21 @@ export const useStore = create<ShotmachineState>()(
         if (length(forward) < 1e-9) return
         const n = normalize(forward)
         // ほぼ真上/真下を向くと、up=+Y 前提の lookAt 行列が特異になり画がロールして暴れる。
-        // ティルトを±89°相当でクランプする
-        const MAX_TILT = Math.sin(rad(89))
-        const f = Math.abs(n.y) > MAX_TILT
-          ? normalize(v3(
-              n.x || 1e-4,
-              Math.sign(n.y) * MAX_TILT,
-              n.z,
-            ))
-          : n
+        // ティルトを±89°でクランプする。
+        // ※ y だけ差し替えて再正規化すると、水平成分が小さいほど y が 1 に戻ってしまい
+        //   クランプが効かない（真下で約89.994°になる）。水平成分を先に正規化し、
+        //   cos(89°)/sin(89°) で直接組み立てる
+        const MAX_Y = Math.sin(rad(89))
+        let f = n
+        if (Math.abs(n.y) > MAX_Y) {
+          const hLen = Math.hypot(n.x, n.z)
+          // 完全な真上/真下は水平方向が定まらないので、現在の視線方向を水平の基準に使う
+          const cur = sub(c.pose.lookAt, c.pose.position)
+          const bx = hLen > 1e-9 ? n.x / hLen : (Math.hypot(cur.x, cur.z) > 1e-9 ? cur.x / Math.hypot(cur.x, cur.z) : 0)
+          const bz = hLen > 1e-9 ? n.z / hLen : (Math.hypot(cur.x, cur.z) > 1e-9 ? cur.z / Math.hypot(cur.x, cur.z) : 1)
+          const h = Math.cos(rad(89))
+          f = v3(bx * h, Math.sign(n.y) * MAX_Y, bz * h)
+        }
         const dist = Math.max(distance(c.pose.position, c.pose.lookAt), 0.5)
         c.pose.lookAt = add(c.pose.position, scale(f, dist))
         scheduleShotAutoSync(id)
@@ -798,8 +818,10 @@ export const useStore = create<ShotmachineState>()(
       set((st) => {
         const c = st.project.scene.cameras.find((c) => c.id === cameraId)
         if (!c) return
+        if (c.frameTargetId === charId) return
         c.frameTargetId = charId
-        if (!charId) delete st.lastFraming[cameraId]
+        // 対象が変わったら古い被写体の記憶を捨てる（captureShot が旧 subjectIds を優先してしまう）
+        delete st.lastFraming[cameraId]
         const name = charId ? st.project.scene.characters.find((x) => x.id === charId)?.name : null
         st.toast = name ? `${c.name} のフレーミング対象を ${name} にしました` : `${c.name} をフリーにしました`
       }),
@@ -871,6 +893,11 @@ export const useStore = create<ShotmachineState>()(
         if (!shot) return
         const cam = st.project.scene.cameras.find((c) => c.id === shot.cameraId)
         if (!cam) { st.toast = 'このカットのカメラは削除されています'; return }
+        // camKeys 制御下のカットは camKeys が正本。リグの現在位置で塗り潰さない
+        if (shot.camKeys?.length) {
+          st.toast = 'このカットはカメラKF制御中です（KFを編集してください）'
+          return
+        }
         shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
         shot.poseSnapshot.b = cam.poseA && cam.poseB ? JSON.parse(JSON.stringify(cam.poseB)) : undefined
         shot.focalLength = cam.pose.focalLength
@@ -883,15 +910,22 @@ export const useStore = create<ShotmachineState>()(
       const ar = aspectToNumber(stNow.project.aspect)
       set((st) => {
         let n = 0
+        let skipped = 0
         for (const shot of st.project.shots) {
           const cam = st.project.scene.cameras.find((c) => c.id === shot.cameraId)
           if (!cam) continue
+          // camKeys 制御下のカットは対象外（KFが正本）
+          if (shot.camKeys?.length) { skipped++; continue }
           shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
+          // 単体同期と揃えて b も更新する（片方だけ更新するとムーブが壊れる）
+          shot.poseSnapshot.b = cam.poseA && cam.poseB ? JSON.parse(JSON.stringify(cam.poseB)) : undefined
           shot.focalLength = cam.pose.focalLength
           if (captureFn) shot.thumbnail = captureFn(cam.pose, ar)
           n++
         }
-        st.toast = `${n}カットをカメラの現在位置に同期しました`
+        st.toast = skipped
+          ? `${n}カットを同期しました（カメラKF制御中の${skipped}カットは対象外）`
+          : `${n}カットをカメラの現在位置に同期しました`
       })
     },
     removeShot: (id) =>
@@ -977,6 +1011,7 @@ export const useStore = create<ShotmachineState>()(
               asCamKeys(left, st.project.scene.cameras),
               left.durationSec,
               asCamKeys(right, st.project.scene.cameras),
+              right.durationSec,
             )
           : undefined
         st.project.shots = mergeShots(st.project.shots, idx)
@@ -1035,7 +1070,7 @@ export const useStore = create<ShotmachineState>()(
         if (!shot?.camKeys) return
         shot.camKeys = removeCamKey(shot.camKeys, index)
         recalcMoveType(shot, st.project.scene.cameras)
-        if (shot.camKeys?.length) scheduleCamKeyThumbSync(shot.id)
+        scheduleCamKeyThumbSync(shot.id)
         st.animScrub = true
       }),
     // 区間の補間カーブ切替（そのKFから次のKFまで）。linear=等速 / easeInOut=加減速
@@ -1054,6 +1089,7 @@ export const useStore = create<ShotmachineState>()(
         if (!shot) return
         shot.camKeys = undefined
         recalcMoveType(shot, st.project.scene.cameras)
+        scheduleCamKeyThumbSync(shot.id)
         st.animScrub = true
         st.toast = 'カメラKFを全消去しました（A→Bムーブ評価に戻ります）'
       }),

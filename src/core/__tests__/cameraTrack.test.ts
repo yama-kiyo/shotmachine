@@ -164,3 +164,34 @@ describe('cameraTrack: 分割と結合', () => {
     expect(mergeCamKeys(undefined, 2, undefined)).toBeUndefined()
   })
 })
+
+// codexレビュー(2026-08-01)指摘の回帰
+describe('cameraTrack: 不正入力とinertの扱い', () => {
+  it('upsertCamKey に NaN を渡しても既存KFが消えない', () => {
+    const keys = [k(0, 0), k(2, 20)]
+    expect(upsertCamKey(keys, NaN, pose(9))).toHaveLength(2)
+    expect(upsertCamKey(keys, Infinity, pose(9))).toHaveLength(2)
+  })
+  it('upsertCamKey に壊れたポーズを渡しても既存KFが消えない', () => {
+    const keys = [k(0, 0), k(2, 20)]
+    const broken = { position: { x: NaN, y: 0, z: 0 }, lookAt: v3(0, 0, 0), roll: 0, focalLength: 35 }
+    expect(upsertCamKey(keys, 1, broken as never)).toHaveLength(2)
+  })
+  it('moveCamKey に NaN を渡しても対象KFが消えない', () => {
+    const keys = [k(0, 0), k(2, 20)]
+    const r = moveCamKey(keys, 1, NaN, 4)
+    expect(r.keys).toHaveLength(2)
+    expect(Number.isFinite(r.tSec)).toBe(true)
+  })
+  it('評価関数は未整列の配列を渡されても先頭/末尾を誤らない', () => {
+    const unsorted = [k(4, 100), k(0, 0)]
+    expect(evalCamKeys(unsorted, 0)!.position.x).toBeCloseTo(0)
+    expect(evalCamKeys(unsorted, 4)!.position.x).toBeCloseTo(100)
+  })
+  it('mergeCamKeys は各カットで尺外だったKFを持ち込まない', () => {
+    // 左: 尺2秒、9秒のKFはinert / 右: 尺2秒
+    const merged = mergeCamKeys([k(0, 0), k(9, 900)], 2, [k(0, 50), k(2, 60)], 2)!
+    expect(merged.some((x) => Math.abs(x.pose.position.x - 900) < 1e-6)).toBe(false)
+    expect(merged[merged.length - 1].tSec).toBeCloseTo(4)
+  })
+})

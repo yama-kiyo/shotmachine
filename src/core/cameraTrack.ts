@@ -45,8 +45,11 @@ export function normalizeCamKeys(keys: CameraKeyframe[]): CameraKeyframe[] {
 // カット尺内の有効KF。尺より後ろのKFは評価から外す（inert・非破壊。尺を戻せば復活する）。
 // 全部が範囲外になった場合でもカメラが消えないよう、先頭1個だけは必ず残す。
 export function activeCamKeys(keys: CameraKeyframe[], durationSec: number): CameraKeyframe[] {
-  const inRange = keys.filter((k) => k.tSec <= durationSec + EPS)
-  return inRange.length ? inRange : keys.slice(0, 1)
+  // 呼び出し側が未整列・未検証の配列を渡しても先頭/末尾判定を誤らないよう、ここで整える。
+  // 既に正規化済みなら並べ替えは実質ノーオペで、評価経路のコストはごく小さい
+  const ks = normalizeCamKeys(keys)
+  const inRange = ks.filter((k) => k.tSec <= durationSec + EPS)
+  return inRange.length ? inRange : ks.slice(0, 1)
 }
 
 // カット先頭からの経過秒 tInShot におけるカメラポーズ。
@@ -104,6 +107,8 @@ export function upsertCamKey(
   pose: CameraPose,
   ease?: CameraKeyframe['ease'],
 ): CameraKeyframe[] {
+  // 非有限値が来ると以降の比較が全て false になり、既存KFを丸ごと消してしまう
+  if (!Number.isFinite(tSec) || !isValidCamKey({ tSec: 0, pose })) return normalizeCamKeys(keys ?? [])
   const t = roundT(Math.max(0, tSec))
   const all = keys ?? []
   const rest = all.filter((k) => Math.abs(k.tSec - t) > 0.05)
@@ -121,6 +126,8 @@ export function moveCamKey(
 ): { keys: CameraKeyframe[]; tSec: number } {
   const kf = keys[index]
   if (!kf) return { keys, tSec: 0 }
+  // 非有限値は無視（NaN が入ると対象KFが消え、再生時刻計算にも NaN が伝播する）
+  if (!Number.isFinite(tSec) || !Number.isFinite(durationSec)) return { keys, tSec: kf.tSec }
   const t = roundT(Math.min(Math.max(tSec, 0), durationSec))
   const rest = keys.filter((_, i) => i !== index)
   return { keys: normalizeCamKeys([...rest, { ...kf, tSec: t }]), tSec: t }
@@ -190,9 +197,15 @@ export function mergeCamKeys(
   leftKeys: CameraKeyframe[] | undefined,
   leftDur: number,
   rightKeys: CameraKeyframe[] | undefined,
+  rightDur = Infinity,
 ): CameraKeyframe[] | undefined {
-  const l = leftKeys ?? []
-  const r = (rightKeys ?? []).map((k) => ({ ...k, tSec: roundT(k.tSec + leftDur) }))
+  // 結合すると尺が伸びるため、各カットで尺外だった（inert な）KFをそのまま持ち込むと
+  // 相手側の区間に割り込んで復活してしまう。連結前にそれぞれ自分の尺で絞る
+  const lRaw = leftKeys ?? []
+  const rRaw = rightKeys ?? []
+  const l = lRaw.length ? activeCamKeys(normalizeCamKeys(lRaw), leftDur) : []
+  const r = (rRaw.length ? activeCamKeys(normalizeCamKeys(rRaw), rightDur) : [])
+    .map((k) => ({ ...k, tSec: roundT(k.tSec + leftDur) }))
   if (!l.length && !r.length) return undefined
   const lastL = l[l.length - 1]
   if (lastL && r.length && Math.abs(lastL.tSec - r[0].tSec) <= 0.005 && !samePose(lastL.pose, r[0].pose)) {

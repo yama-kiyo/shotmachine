@@ -208,6 +208,9 @@ function SelectionGizmo() {
     <TransformControls
       object={target}
       mode={mode}
+      // カメラの回転はオブジェクトのローカル軸で行う。world 空間だと、カメラが横を向いている
+      // ときに world-X 回転が前方ベクトルをほとんど変えず「ティルトが効かない」状態になる
+      space={isRotate && isCamera ? 'local' : 'world'}
       size={0.7}
       showX={isRotate ? isCamera : true}
       showZ={isRotate ? false : true}
@@ -220,12 +223,13 @@ function SelectionGizmo() {
           const onKf = c?.keyframes?.some((k) => Math.abs(k.time - t) <= 0.05) ?? false
           kfModeRef.current = st.autokey || onKf
         } else {
-          kfModeRef.current = false
+          // カメラのドラッグも1操作=1 Undo にまとめる（毎フレーム set を呼ぶため、
+          // まとめないと Ctrl+Z を何度も押す羽目になる）
+          kfModeRef.current = isCamera
         }
-        // KF書き込みモードのみ1ドラッグ=1 Undo にまとめる。通常のposition更新は従来どおり
         if (kfModeRef.current) st.beginTimelineDrag()
       }}
-      onMouseUp={() => { if (kfModeRef.current) useStore.getState().endTimelineDrag() }}
+      onMouseUp={() => { if (kfModeRef.current) { useStore.getState().endTimelineDrag(); kfModeRef.current = false } }}
       onObjectChange={() => {
         const o = objRef.current
         if (!o) return

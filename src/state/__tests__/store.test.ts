@@ -349,14 +349,95 @@ describe('store: カメラ操作（フリー）', () => {
 })
 
 describe('store: カメラ回転の特異姿勢クランプ', () => {
-  it('真下を向かせてもティルトが±89°でクランプされ、注視点が破綻しない', () => {
+  // codexレビュー(2026-08-01)指摘: y だけ差し替えて再正規化するとクランプが効かず
+  // 真下で約89.994°になっていた。角度そのものを検証する
+  it.each([[0, -1, 0], [0, 1, 0], [0.001, -1, 0.001]])(
+    'ほぼ真上/真下(%s,%s,%s)を向かせてもティルトが89°を超えない',
+    (x, y, z) => {
+      load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
+      useStore.getState().dragCameraOrientation('cam1', v3(x, y, z))
+      const p = useStore.getState().project.scene.cameras[0].pose
+      const d = Math.hypot(p.lookAt.x - p.position.x, p.lookAt.y - p.position.y, p.lookAt.z - p.position.z)
+      const tiltDeg = Math.abs(Math.asin((p.lookAt.y - p.position.y) / d) * 180 / Math.PI)
+      expect(Number.isFinite(tiltDeg)).toBe(true)
+      expect(tiltDeg).toBeLessThanOrEqual(89.001)
+      expect(tiltDeg).toBeGreaterThan(88.9) // ほぼ限界までは向く
+    },
+  )
+})
+
+describe('store: codexレビュー指摘の回帰', () => {
+  it('camKeys 制御中のカットは「カメラの現在位置で更新」で塗り潰されない', () => {
+    // リグは x=0、KF由来の派生キャッシュは x=100。同期を押しても 0 で塗り潰されないこと
+    load({
+      shots: [shot('a', 4, {
+        poseSnapshot: { a: cpose(100), b: cpose(200) },
+        camKeys: [{ tSec: 0, pose: cpose(100) }, { tSec: 4, pose: cpose(200) }],
+      })],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().syncShotToCamera('a')
+    const s = useStore.getState().project.shots[0]
+    expect(s.camKeys).toHaveLength(2)
+    expect(s.poseSnapshot.a.position.x).toBeCloseTo(100)
+    expect(s.poseSnapshot.b?.position.x).toBeCloseTo(200)
+  })
+
+  it('「全カットをカメラに同期」も camKeys カットを飛ばす', () => {
+    load({
+      shots: [
+        shot('a', 4, {
+          poseSnapshot: { a: cpose(100), b: cpose(200) },
+          camKeys: [{ tSec: 0, pose: cpose(100) }, { tSec: 4, pose: cpose(200) }],
+        }),
+        shot('b', 4, { poseSnapshot: { a: cpose(77) } }),
+      ],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().syncAllShotsToCameras()
+    const shots = useStore.getState().project.shots
+    expect(shots[0].camKeys).toHaveLength(2)
+    expect(shots[0].poseSnapshot.a.position.x).toBeCloseTo(100) // KFカットは無傷
+    expect(shots[1].poseSnapshot.a.position.x).toBeCloseTo(0)   // 通常カットはリグ(0)へ同期
+  })
+
+  it('KFを全消去すると派生キャッシュも旧KF値を引きずらない', () => {
+    load({
+      shots: [shot('a', 4, {
+        poseSnapshot: { a: cpose(0) },
+        camKeys: [{ tSec: 0, pose: cpose(100) }, { tSec: 4, pose: cpose(200) }],
+      })],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().clearCamKeyframes('a')
+    const s = useStore.getState().project.shots[0]
+    expect(s.camKeys).toBeUndefined()
+    // 旧KFの 100/200 ではなく、実効ポーズ（凍結ポーズ）へ戻っている
+    expect(s.poseSnapshot.a.position.x).not.toBeCloseTo(100)
+    expect(s.poseSnapshot.b).toBeUndefined()
+    expect(s.moveType).toBe('Static')
+  })
+
+  it('結合時に尺外(inert)のKFが復活して相手の区間へ割り込まない', () => {
+    load({
+      shots: [
+        // 尺2秒だが 9秒のKFを保持（inert）
+        shot('a', 2, { camKeys: [{ tSec: 0, pose: cpose(0) }, { tSec: 9, pose: cpose(900) }] }),
+        shot('b', 2, { camKeys: [{ tSec: 0, pose: cpose(50) }, { tSec: 2, pose: cpose(60) }] }),
+      ],
+      scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] },
+    })
+    useStore.getState().mergeShotWithNext('a')
+    const keys = useStore.getState().project.shots[0].camKeys!
+    // 900 のKFは左カットで尺外だったので持ち込まれない
+    expect(keys.some((k) => Math.abs(k.pose.position.x - 900) < 1e-6)).toBe(false)
+    expect(keys[keys.length - 1].pose.position.x).toBeCloseTo(60)
+  })
+
+  it('フレーミング対象を変えると古い被写体の記憶が捨てられる', () => {
     load({ scene: { ...emptyProject().scene, cameras: [cam('cam1', 'CAM A')] } })
-    useStore.getState().dragCameraOrientation('cam1', v3(0, -1, 0))
-    const p = useStore.getState().project.scene.cameras[0].pose
-    const d = Math.hypot(p.lookAt.x - p.position.x, p.lookAt.y - p.position.y, p.lookAt.z - p.position.z)
-    const dy = (p.lookAt.y - p.position.y) / d
-    expect(Number.isFinite(d)).toBe(true)
-    expect(Math.abs(dy)).toBeLessThan(1) // 完全な真下(=-1)にはならない
-    expect(dy).toBeLessThan(-0.9) // ほぼ真下は向く
+    useStore.setState((st) => { st.lastFraming['cam1'] = { size: 'CU', subjectIds: ['old'] } })
+    useStore.getState().setCameraFrameTarget('cam1', 'newChar')
+    expect(useStore.getState().lastFraming['cam1']).toBeUndefined()
   })
 })
