@@ -43,15 +43,59 @@ test.describe('ショットマシン 主要フロー', () => {
     await expect(page.getByTestId('outliner-cameras')).toContainText('CAM D')
   })
 
-  test('自動フレーミング: FRAME AS CUでカメラが動く', async ({ page }) => {
+  test('自動フレーミング: 対象を選ぶとFRAME AS CUでカメラが動く', async ({ page }) => {
     await waitForApp(page)
     await page.getByTestId('outliner-cam-CAM-A').click()
+    // 新規カメラの既定はフリー（勝手に先頭キャラを狙わない）＝サイズ合わせは使えない
+    await expect(page.getByTestId('frame-CU')).toBeDisabled()
+    await page.getByTestId('frame-target').selectOption({ label: 'Maya' })
     const posX = page.getByTestId('cam-pos-x')
     const before = await posX.inputValue()
     await page.getByTestId('frame-CU').click()
     await page.waitForTimeout(300)
     const after = await posX.inputValue()
     expect(after).not.toBe(before)
+  })
+
+  test('フレーミング対象を選べる: 対象を変えると別のキャラを狙う', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    // Maya を狙ってCU
+    await page.getByTestId('frame-target').selectOption({ label: 'Maya' })
+    await page.getByTestId('frame-CU').click()
+    await page.waitForTimeout(200)
+    const towardMaya = {
+      x: parseFloat(await page.getByTestId('cam-pos-x').inputValue()),
+      z: parseFloat(await page.getByTestId('cam-pos-z').inputValue()),
+    }
+    // 対象を Dan に変えて同じCU → 別の位置へ行く（旧実装では常に先頭キャラだった）
+    await page.getByTestId('frame-target').selectOption({ label: 'Dan' })
+    await page.getByTestId('frame-CU').click()
+    await page.waitForTimeout(200)
+    const towardDan = {
+      x: parseFloat(await page.getByTestId('cam-pos-x').inputValue()),
+      z: parseFloat(await page.getByTestId('cam-pos-z').inputValue()),
+    }
+    expect(Math.hypot(towardDan.x - towardMaya.x, towardDan.z - towardMaya.z)).toBeGreaterThan(0.3)
+    // 対象はカメラに保持される（選択を切り替えても戻ってくる）
+    await page.getByTestId('outliner-characters').getByText('Maya').click()
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    await expect(page.getByTestId('frame-target')).toHaveValue(/.+/)
+    const label = await page.getByTestId('frame-target').locator('option:checked').textContent()
+    expect(label).toBe('Dan')
+  })
+
+  test('フリーのカメラはサイズ合わせに縛られず手動で動かせる', async ({ page }) => {
+    await waitForApp(page)
+    await page.getByTestId('outliner-cam-CAM-A').click()
+    // 既定フリー: フレーミングボタンは全て無効
+    await expect(page.getByTestId('frame-CU')).toBeDisabled()
+    await expect(page.getByTestId('frame-OTS')).toBeDisabled()
+    // それでも位置は自由に変えられる
+    await page.getByTestId('cam-pos-x').fill('2.75')
+    await page.getByTestId('cam-pos-x').press('Enter')
+    await page.waitForTimeout(150)
+    expect(parseFloat(await page.getByTestId('cam-pos-x').inputValue())).toBeCloseTo(2.75, 1)
   })
 
   test('180°ルール: ライン越えで警告、サイド再設定で解消', async ({ page }) => {
@@ -130,8 +174,9 @@ test.describe('ショットマシン 主要フロー', () => {
 
   test('V2 姿勢制御: 座らせるとCUのカメラ高さが下がる', async ({ page }) => {
     await waitForApp(page)
-    // 立位でCU
+    // 立位でCU（フレーミング対象は Maya を明示）
     await page.getByTestId('outliner-cam-CAM-A').click()
+    await page.getByTestId('frame-target').selectOption({ label: 'Maya' })
     await page.getByTestId('frame-CU').click()
     await page.waitForTimeout(200)
     const standY = parseFloat(await page.getByTestId('cam-pos-y').inputValue())

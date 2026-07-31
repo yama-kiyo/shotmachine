@@ -23,10 +23,11 @@ function tickStep(pxPerSec: number): number {
 }
 
 interface Focus {
-  kind: 'boundary' | 'clip' | 'diamond'
+  kind: 'boundary' | 'clip' | 'diamond' | 'camkey'
   index?: number
   id?: string
   charId?: string
+  shotId?: string
 }
 
 export function TimelineTab() {
@@ -197,6 +198,40 @@ export function TimelineTab() {
     })
   }
 
+  // --- カメラKF（◇）ドラッグ: カット内ローカル秒を変更（再生ヘッド追従スクラブ）---
+  // 時刻はカット内ローカルなので、スナップ候補との比較は「カット開始＋tSec」の絶対時刻で行う。
+  const onCamKeyDown = (e: React.PointerEvent, shotId: string, index: number): void => {
+    e.stopPropagation()
+    const st0 = useStore.getState()
+    const si = st0.project.shots.findIndex((s) => s.id === shotId)
+    const kf = st0.project.shots[si]?.camKeys?.[index]
+    if (!kf) return
+    setFocus({ kind: 'camkey', shotId, index })
+    useStore.getState().selectShot(shotId)
+    const shotStart = shotStarts(st0.project.shots)[si]
+    const origAbs = shotStart + kf.tSec
+    let curIndex = index
+    startDrag(e, {
+      history: true,
+      onMove: (deltaSec) => {
+        const cands = baseCandidates().filter((c) => Math.abs(c - origAbs) > 1e-6)
+        const targetAbs = applySnap(origAbs + deltaSec, cands)
+        const stn = useStore.getState()
+        const i = stn.project.shots.findIndex((s) => s.id === shotId)
+        if (i < 0) return
+        const start = shotStarts(stn.project.shots)[i]
+        stn.moveCamKeyframe(shotId, curIndex, targetAbs - start)
+        // 再ソートで index がずれるため、適用後の時刻から追跡し直す
+        const keys = useStore.getState().project.shots[i]?.camKeys ?? []
+        const applied = Math.round(
+          Math.min(Math.max(targetAbs - start, 0), stn.project.shots[i].durationSec) * 100,
+        ) / 100
+        const ni = keys.findIndex((k) => Math.abs(k.tSec - applied) < 0.001)
+        if (ni >= 0) { curIndex = ni; setFocus({ kind: 'camkey', shotId, index: ni }) }
+      },
+    })
+  }
+
   // --- キーボード nudge（←→=±1コマ, Shift=±1s）+ Delete ---
   const onKeyDown = (e: React.KeyboardEvent): void => {
     if (!focus) return
@@ -205,6 +240,10 @@ export function TimelineTab() {
       if (focus.kind === 'diamond' && focus.charId != null && focus.index != null) {
         e.preventDefault()
         st.removeCharKeyframe(focus.charId, focus.index)
+        setFocus(null)
+      } else if (focus.kind === 'camkey' && focus.shotId != null && focus.index != null) {
+        e.preventDefault()
+        st.removeCamKeyframe(focus.shotId, focus.index)
         setFocus(null)
       }
       return
@@ -230,6 +269,16 @@ export function TimelineTab() {
         const applied = Math.round(Math.min(Math.max(kf.time + d, 0), total) * 100) / 100
         const ni = kfs.findIndex((k) => Math.abs(k.time - applied) < 0.001)
         if (ni >= 0) setFocus({ kind: 'diamond', charId: focus.charId, index: ni })
+      }
+    } else if (focus.kind === 'camkey' && focus.shotId != null && focus.index != null) {
+      const shot = st.project.shots.find((x) => x.id === focus.shotId)
+      const kf = shot?.camKeys?.[focus.index]
+      if (shot && kf) {
+        st.moveCamKeyframe(focus.shotId, focus.index, kf.tSec + d)
+        const keys = st.project.shots.find((x) => x.id === focus.shotId)?.camKeys ?? []
+        const applied = Math.round(Math.min(Math.max(kf.tSec + d, 0), shot.durationSec) * 100) / 100
+        const ni = keys.findIndex((k) => Math.abs(k.tSec - applied) < 0.001)
+        if (ni >= 0) setFocus({ kind: 'camkey', shotId: focus.shotId, index: ni })
       }
     }
     st.endTimelineDrag()
@@ -266,7 +315,15 @@ export function TimelineTab() {
         {/* 左ラベル列 */}
         <div className="tl-labels" style={{ width: LABEL_W }}>
           <div style={{ height: RULER_H }} />
-          <div className="tl-lbl tl-lbl-track" style={{ height: CUT_H }}>カメラ</div>
+          <div className="tl-lbl tl-lbl-track" style={{ height: CUT_H }}>
+            <span>カメラ</span>
+            <button
+              className="tl-addkf"
+              title="再生ヘッド位置に、そのカットのカメラの現在位置でキーフレームを追加"
+              data-testid="tl-addcamkf"
+              onClick={() => useStore.getState().addCamKeyframeAtPlayhead()}
+            >◇＋</button>
+          </div>
           <div className="tl-lbl tl-lbl-track" style={{ height: AUDIO_H }}>音声</div>
           {characters.map((c) => (
             <div key={c.id} className="tl-lbl tl-lbl-char" style={{ height: CHAR_H }}>
@@ -341,6 +398,29 @@ export function TimelineTab() {
                 title="ドラッグ=最終カットの尺（総尺）を伸縮"
                 onPointerDown={onEndDown}
               />
+              {/* カメラKF（◇）: カットブロックの上に重ねて描く。時刻はカット内ローカル秒なので
+                  絶対位置は カット開始 + tSec。カット尺より後ろへ出たKFは inert（グレー）表示 */}
+              {shots.map((s, i) =>
+                (s.camKeys ?? []).map((k, ki) => {
+                  const inert = k.tSec > s.durationSec + 1e-6
+                  const isFocus = focus?.kind === 'camkey' && focus.shotId === s.id && focus.index === ki
+                  return (
+                    <div
+                      key={`${s.id}-ck${ki}`}
+                      className={`tl-camkey ${isFocus ? 'focus' : ''} ${inert ? 'inert' : ''}`}
+                      style={{ left: (starts[i] + k.tSec) * pxPerSec - 6 }}
+                      data-testid={`tl-camkey-${i}-${ki}`}
+                      title={
+                        inert
+                          ? `${k.tSec.toFixed(2)}s（カット尺の外・再生には使われません）`
+                          : `カメラKF ${k.tSec.toFixed(2)}s（カット内） / ${Math.round(k.pose.focalLength)}mm`
+                          + '\nドラッグ=時刻変更 / Delete=削除'
+                      }
+                      onPointerDown={(e) => onCamKeyDown(e, s.id, ki)}
+                    />
+                  )
+                }),
+              )}
             </div>
 
             {/* 音声トラック */}
@@ -402,6 +482,15 @@ export function TimelineTab() {
               <>
                 <button onClick={() => { useStore.getState().selectShot(shot.id); useStore.getState().splitShotAtPlayhead(); setMenu(null) }}>ここで分割</button>
                 <button disabled={idx >= shots.length - 1} onClick={() => { useStore.getState().mergeShotWithNext(shot.id); setMenu(null) }}>次と結合</button>
+                <button
+                  data-testid="tl-menu-addcamkf"
+                  onClick={() => { useStore.getState().addCamKeyframeAtPlayhead(shot.id); setMenu(null) }}
+                >📷 カメラKFを追加（再生ヘッド位置）</button>
+                {!!shot.camKeys?.length && (
+                  <button onClick={() => { useStore.getState().clearCamKeyframes(shot.id); setMenu(null) }}>
+                    ◇ カメラKFを全消去（{shot.camKeys.length}）
+                  </button>
+                )}
                 <button onClick={() => setMenu({ ...menu, camSub: true })}>カメラ差し替え ▸</button>
                 <button className="danger" onClick={() => { useStore.getState().removeShot(shot.id); setMenu(null) }}>削除</button>
               </>

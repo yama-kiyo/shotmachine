@@ -95,10 +95,12 @@ export function buildCutscene(
 
   const cameras: CameraRig[] = []
   const cameraByKey = new Map<string, CameraRig>()
-  const ensureCamera = (key: string, name: string, pose: CameraPose): CameraRig => {
+  // 台本生成カメラは狙う相手が自明（"CU Dan" は Dan）なので、フレーミング対象を明示的に焼く。
+  // 焼いておかないと、右パネルでフレーミングし直したときに先頭キャラへ向いてしまう。
+  const ensureCamera = (key: string, name: string, pose: CameraPose, frameTargetId?: string): CameraRig => {
     let cam = cameraByKey.get(key)
     if (!cam) {
-      cam = { id: genId('cam'), name, pose, moveDurationSec: 4 }
+      cam = { id: genId('cam'), name, pose, moveDurationSec: 4, frameTargetId: frameTargetId ?? null }
       cameraByKey.set(key, cam)
       cameras.push(cam)
     }
@@ -129,7 +131,7 @@ export function buildCutscene(
   const masterShot = (text: string, durationSec: number): PlannedShot | null => {
     if (a && b) {
       const pose = solveTwoShot(a, b, 35, ar, lockedSide)
-      const cam = ensureCamera('master', 'MASTER', pose)
+      const cam = ensureCamera('master', 'MASTER', pose, a.id)
       return {
         cameraName: cam.name, pose, shotSize: '2-SHOT', speakerName: null,
         subjectNames: [a.name, b.name], text, durationSec,
@@ -137,7 +139,7 @@ export function buildCutscene(
     }
     if (a) {
       const pose = solveFraming(a, 'WS', 28, ar)
-      const cam = ensureCamera('master', 'MASTER', pose)
+      const cam = ensureCamera('master', 'MASTER', pose, a.id)
       return {
         cameraName: cam.name, pose, shotSize: 'WS', speakerName: null,
         subjectNames: [a.name], text, durationSec,
@@ -170,7 +172,7 @@ export function buildCutscene(
     // 切り返し: 初登場はOTS、以降はCU/MCUを交互
     if (listener && count === 0) {
       const pose = solveOTS(speaker, listener, 50, ar, sideFor(speaker))
-      const cam = ensureCamera(`ots_${speaker.id}`, `OTS ${speaker.name}`, pose)
+      const cam = ensureCamera(`ots_${speaker.id}`, `OTS ${speaker.name}`, pose, speaker.id)
       shots.push({
         cameraName: cam.name, pose, shotSize: 'OTS', speakerName: speaker.name,
         subjectNames: [speaker.name, listener.name], text: line.text, emotion: line.emotion, durationSec: dur,
@@ -186,7 +188,7 @@ export function buildCutscene(
           )
         : undefined
       const pose = solveFraming(speaker, size as 'CU' | 'MCU', 65, ar, refPos)
-      const cam = ensureCamera(`${size}_${speaker.id}`, `${size} ${speaker.name}`, pose)
+      const cam = ensureCamera(`${size}_${speaker.id}`, `${size} ${speaker.name}`, pose, speaker.id)
       shots.push({
         cameraName: cam.name, pose, shotSize: size, speakerName: speaker.name,
         subjectNames: [speaker.name], text: line.text, emotion: line.emotion, durationSec: dur,

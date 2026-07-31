@@ -25,6 +25,10 @@ export interface CameraRig {
   poseA?: CameraPose // ムーブ開始
   poseB?: CameraPose // ムーブ終了
   moveDurationSec: number
+  // フレーミング対象キャラ。null/未設定＝フリー（自動フレーミングを使わず完全手動で動かす）。
+  // 以前は「今選択中のオブジェクト」から毎回推測していたため、カメラを選ぶと必ず先頭キャラが
+  // 対象になり、狙うキャラを選べなかった。カメラ自身に持たせて明示・永続化する。
+  frameTargetId?: string | null
 }
 
 export type PoseState = 'stand' | 'sit' | 'crouch' | 'lie'
@@ -108,6 +112,14 @@ export interface DialogueClip {
   durationSec: number
 }
 
+// カット内カメラキーフレーム。時刻は「カットIN点からのローカル秒」（絶対時間ではない）。
+// 詳細と設計根拠は core/cameraTrack.ts 冒頭コメント、docs/DESIGN_camera-keyframes.md 参照。
+export interface CameraKeyframe {
+  tSec: number // カットIN点からのローカル秒（0=カット頭）。0.01s丸め
+  pose: CameraPose
+  ease?: 'linear' | 'easeInOut' // このKFから次のKFへの補間。既定 'easeInOut'（従来ムーブと同じ）
+}
+
 export interface Shot {
   id: string
   cameraId: string
@@ -123,6 +135,7 @@ export interface Shot {
   poseSnapshot: { a: CameraPose; b?: CameraPose } // 凍結ポーズ
   source?: 'script' | 'capture' // script=ライブカメラ連動 / capture=凍結ポーズ。旧 dialogue 有無判定の移設先
   moveRange?: [number, number] // A→Bムーブの正規化窓（既定[0,1]）。分割時に比率分割
+  camKeys?: CameraKeyframe[] // カット内カメラKF（tSec昇順）。1個以上あれば A/B ムーブより優先される
   clipId?: string // このカットを生成した DialogueClip の id（script カットのみ）。一括TTS時の尺追従に使う
 }
 

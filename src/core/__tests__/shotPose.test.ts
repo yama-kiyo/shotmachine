@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { moveU, shotPoseAtU, shotHasMove, animaticPoseAt } from '../shotPose'
+import { moveU, shotPoseAtU, shotPoseAtLocal, shotHasMove, animaticPoseAt } from '../shotPose'
 import { v3 } from '../math'
 import type { Shot, CameraRig, CameraPose } from '../../model/types'
 
@@ -68,5 +68,56 @@ describe('shotPose: animaticPoseAt', () => {
   })
   it('ショットなしは null', () => {
     expect(animaticPoseAt([], [], 0)).toBeNull()
+  })
+})
+
+describe('shotPose: camKeys 優先（カメラキーフレーム）', () => {
+  const camWithAB: CameraRig = {
+    id: 'cam1', name: 'CAM A', moveDurationSec: 4,
+    pose: pose(0), poseA: pose(0), poseB: pose(20),
+  }
+
+  it('camKeys があれば A/B ムーブより優先される', () => {
+    const s = mkShot({
+      source: 'script', durationSec: 4,
+      camKeys: [{ tSec: 0, pose: pose(100) }, { tSec: 4, pose: pose(200) }],
+    })
+    // カメラ側 poseA(0)→poseB(20) ではなく camKeys(100→200) が使われる
+    expect(shotPoseAtLocal(s, [camWithAB], 2)!.position.x).toBeCloseTo(150)
+    expect(shotHasMove(s, [camWithAB])).toBe(true)
+  })
+
+  it('カット内3キーが再生時刻に正しく反映される（静止→寄る）', () => {
+    const shots = [
+      mkShot({ id: 'a', durationSec: 2 }),
+      mkShot({
+        id: 'b', durationSec: 3,
+        camKeys: [{ tSec: 0, pose: pose(0) }, { tSec: 2, pose: pose(0) }, { tSec: 3, pose: pose(100) }],
+      }),
+    ]
+    expect(animaticPoseAt(shots, [], 3)!.position.x).toBeCloseTo(0)    // 2カット目1秒＝静止中
+    expect(animaticPoseAt(shots, [], 4.5)!.position.x).toBeCloseTo(50) // 寄りの中間
+  })
+
+  it('camKeys が空配列/未定義なら従来のA/B評価に戻る（後方互換）', () => {
+    const s1 = mkShot({ source: 'script', camKeys: [] })
+    expect(shotPoseAtLocal(s1, [camWithAB], 1)!.position.x).toBeCloseTo(10) // 4秒尺の中点→u=0.5
+    const s2 = mkShot({ source: 'script' })
+    expect(shotPoseAtLocal(s2, [camWithAB], 1)!.position.x).toBeCloseTo(10)
+  })
+
+  it('動かない camKeys（同ポーズ2キー）は shotHasMove=false', () => {
+    const s = mkShot({ camKeys: [{ tSec: 0, pose: pose(5) }, { tSec: 2, pose: pose(5) }] })
+    expect(shotHasMove(s, [])).toBe(false)
+  })
+
+  it('カット尺を縮めても、尺内のKFだけで再生が成立する（inert）', () => {
+    const s = mkShot({
+      durationSec: 1,
+      camKeys: [{ tSec: 0, pose: pose(0) }, { tSec: 5, pose: pose(500) }],
+    })
+    // 5秒のKFは尺外なので評価に入らず、先頭KFでホールドされる
+    expect(shotPoseAtLocal(s, [], 1)!.position.x).toBeCloseTo(0)
+    expect(shotHasMove(s, [])).toBe(false)
   })
 })

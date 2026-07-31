@@ -6,9 +6,16 @@ import { SCENE_TOOLS, executeTool } from './sceneTools'
 const KEY_STORAGE = 'shotmachine.apiKey'
 export const DEFAULT_MODEL = 'claude-opus-4-8'
 
-export const getApiKey = (): string | null => localStorage.getItem(KEY_STORAGE)
+// 優先順位: 手入力（localStorage）→ .envのVITE_ANTHROPIC_API_KEY（ローカル専用ビルドに埋め込み）。
+// ⚠️ VITE_ プレフィックスの値はJSバンドルへ平文で焼き込まれる。.env を入れたままビルドした dist は
+// 絶対に公開しないこと（.gitignore 済み。公開版は画面からの手入力で使う想定）。
+// 空値・空白のみは「未設定」として扱う（.env に行だけ用意して値が空の状態を正しく無視する）
+const ENV_KEY = (import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined)?.trim() || null
+export const getApiKey = (): string | null => localStorage.getItem(KEY_STORAGE) ?? ENV_KEY
 export const setApiKey = (k: string): void => localStorage.setItem(KEY_STORAGE, k)
 export const clearApiKey = (): void => localStorage.removeItem(KEY_STORAGE)
+// .env 由来のキーで動いているか（UI表示用。localStorage に手入力があればそちらが優先）
+export const isEnvKey = (): boolean => !localStorage.getItem(KEY_STORAGE) && !!ENV_KEY
 
 const SYSTEM_PROMPT = `あなたは3Dショット計画ツール「ショットマシン」のシーンアシスタントです。
 監督の指示（例:「もっとローアングルにして」「MayaのCUにして」「2人が入る引きの画に」）を、提供されたツールでシーンに反映します。

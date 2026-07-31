@@ -307,10 +307,8 @@ function CameraTab() {
   const ar = aspectToNumber(st.project.aspect)
   const hfov = focalToHFovDeg(cam.pose.focalLength, ar)
   const chars = st.project.scene.characters
-  const frameTarget =
-    (st.selection?.type === 'character' && chars.find((c) => c.id === st.selection!.id)) ||
-    (st.project.axis && chars.find((c) => c.id === st.project.axis!.charAId)) ||
-    chars[0]
+  // フレーミング対象はカメラ自身の設定（null/未設定＝フリー）。選択状態から推測しない
+  const frameTarget = cam.frameTargetId ? chars.find((c) => c.id === cam.frameTargetId) : undefined
   const subjectEyeY = frameTarget ? eyeY(frameTarget) : undefined
   const moveType = cam.poseA && cam.poseB ? classifyMove(cam.poseA, cam.poseB) : null
 
@@ -370,16 +368,39 @@ function CameraTab() {
         {formatHeightLabel(cameraHeightLabel(cam.pose, subjectEyeY))}
       </div>
 
-      <div className="section-title">
-        フレーミング{frameTarget ? `: ${frameTarget.name}` : ''}
+      <div className="section-title">フレーミング</div>
+      <div className="field-row"><label>対象</label>
+        <select
+          style={{ flex: 1 }}
+          value={cam.frameTargetId ?? ''}
+          onChange={(e) => st.setCameraFrameTarget(cam.id, e.target.value || null)}
+          title="フリー＝自動フレーミングを使わず、位置・注視点・レンズを完全手動で操作する"
+          data-testid="frame-target"
+        >
+          <option value="">フリー（手動）</option>
+          {chars.map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
       </div>
+      {!frameTarget && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', margin: '2px 0 4px' }}>
+          {chars.length
+            ? 'フリー: カメラは被写体に縛られません。サイズ合わせを使うには対象を選んでください'
+            : 'フリー: キャラクターがいなくてもカメラは自由に動かせます'}
+        </div>
+      )}
       <div className="preset-grid">
         {FRAME_SIZES.map((s) => (
           <button
             key={s}
             onClick={() => st.frameAs(s)}
             disabled={!frameTarget}
-            title={s in SHOT_SIZE_DEFS ? SHOT_SIZE_DEFS[s as keyof typeof SHOT_SIZE_DEFS].label : s}
+            title={
+              !frameTarget
+                ? 'フリー中は使えません（対象を選ぶと有効になります）'
+                : s in SHOT_SIZE_DEFS ? SHOT_SIZE_DEFS[s as keyof typeof SHOT_SIZE_DEFS].label : s
+            }
             data-testid={`frame-${s}`}
           >{s}</button>
         ))}

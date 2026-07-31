@@ -237,6 +237,17 @@ input[type='checkbox'] { accent-color: var(--accent); }
 }
 .tl-diamond.focus { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 
+/* カメラKF: カットトラック上に重ねる。キャラの◆（accent色・トラック中央）と紛れないよう
+   黄系＋カットブロックの下寄せに置き、境界ハンドル（端3px）とは領域を分ける */
+.tl-camkey {
+  position: absolute; bottom: 3px; width: 11px; height: 11px; transform: rotate(45deg);
+  background: #14161b; border: 2px solid var(--warn); cursor: grab; z-index: 3;
+}
+.tl-camkey:hover { border-color: #ffd479; }
+.tl-camkey.focus { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.tl-camkey.inert { border-color: var(--text-dim); opacity: 0.5; }
+.tl-lbl-track { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+
 .tl-playhead { position: absolute; top: 0; width: 2px; background: var(--warn); pointer-events: none; z-index: 5; }
 
 .tl-menu {

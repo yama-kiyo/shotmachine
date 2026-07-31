@@ -20,7 +20,10 @@ import { establishSide, checkCameraSide, SideStatus } from '../core/axis180'
 import { generateCoverage } from '../core/coverage'
 import { classifyMove } from '../core/moveClassifier'
 import { lerpPose } from '../core/interpolate'
-import { shotPoseAtU, moveU } from '../core/shotPose'
+import { shotPoseAtLocal, shotHasMove } from '../core/shotPose'
+import {
+  activeCamKeys, camKeysFromAB, mergeCamKeys, moveCamKey, removeCamKey, splitCamKeys, upsertCamKey,
+} from '../core/cameraTrack'
 import type { Vec3 } from '../core/math'
 import { parseScript } from '../core/scriptParser'
 import { buildCutscene } from '../core/sceneBuilder'
@@ -66,6 +69,8 @@ function scheduleShotAutoSync(cameraId: string): void {
     useStore.setState((s) => {
       for (const shot of s.project.shots) {
         if (shot.source !== 'script' || !ids.has(shot.cameraId)) continue
+        // camKeys 制御下のカットは camKeys が正本。リグの現在ポーズで上書きしない
+        if (shot.camKeys?.length) continue
         const cam = s.project.scene.cameras.find((c) => c.id === shot.cameraId)
         if (!cam) continue
         shot.poseSnapshot.a = JSON.parse(JSON.stringify(cam.pose))
@@ -74,6 +79,37 @@ function scheduleShotAutoSync(cameraId: string): void {
       }
     })
   }, 600)
+}
+
+// camKeys を「カメラワークの正本」として、そこから派生する Shot 上のフィールドを揃える。
+//
+// poseSnapshot / focalLength / moveType は、絵コンテPNG・PDF・ショットリストCSV・
+// AIプロンプト出力（promptGen）が参照する“派生キャッシュ”。ここを同期しておかないと、
+// 再生だけカメラが動いて書き出し系が全部 'Static' のまま取り残される（＝今回の不具合の本体）。
+//
+// 3キー以上で隣接区間の分類が2種類以上に割れる場合は 'Compound'（複合ムーブ）とする。
+function recalcMoveType(shot: Shot, cameras: CameraRig[]): void {
+  if (shot.camKeys?.length) {
+    const act = activeCamKeys(shot.camKeys, shot.durationSec)
+    const head = act[0]
+    const tail = act[act.length - 1]
+    // 派生キャッシュを先頭KF/末尾KFへ同期
+    shot.poseSnapshot = {
+      a: JSON.parse(JSON.stringify(head.pose)),
+      b: act.length >= 2 ? JSON.parse(JSON.stringify(tail.pose)) : undefined,
+    }
+    shot.focalLength = head.pose.focalLength
+    if (act.length < 2) { shot.moveType = 'Static'; return }
+    const segs = act.slice(0, -1)
+      .map((k, i) => classifyMove(k.pose, act[i + 1].pose))
+      .filter((m) => m !== 'Static')
+    const kinds = new Set(segs)
+    shot.moveType = kinds.size >= 2 ? 'Compound' : classifyMove(head.pose, tail.pose)
+    return
+  }
+  const a = shotPoseAtLocal(shot, cameras, 0)
+  const b = shotHasMove(shot, cameras) ? shotPoseAtLocal(shot, cameras, shot.durationSec) : null
+  shot.moveType = a && b ? classifyMove(a, b) : 'Static'
 }
 
 interface ShotmachineState {
@@ -170,8 +206,14 @@ interface ShotmachineState {
   // カット編集（タイムライン）
   rollCutBoundary: (boundaryIdx: number, deltaSec: number) => void
   rippleCutBoundary: (boundaryIdx: number, deltaSec: number) => void
+  setCameraFrameTarget: (cameraId: string, charId: string | null) => void
   splitShotAtPlayhead: () => void
   mergeShotWithNext: (shotId: string) => void
+  // カメラKF（カット内ローカル秒。camKeys があれば A/B ムーブより優先される）
+  addCamKeyframeAtPlayhead: (shotId?: string) => void
+  moveCamKeyframe: (shotId: string, index: number, tSec: number) => void
+  removeCamKeyframe: (shotId: string, index: number) => void
+  clearCamKeyframes: (shotId: string) => void
   reassignShotCamera: (shotId: string, cameraId: string) => void
   moveClip: (clipId: string, newStartSec: number) => void
   applyVoiceToClip: (clipId: string, audio: string, alignment: Alignment | undefined, audioDurSec: number) => void
@@ -426,6 +468,8 @@ export const useStore = create<ShotmachineState>()(
           if (st.project.axis && (st.project.axis.charAId === sel.id || st.project.axis.charBId === sel.id)) {
             st.project.axis = undefined
           }
+          // このキャラを狙っていたカメラはフリーへ戻す（消えたキャラを指し続けないように）
+          for (const cam of sc.cameras) if (cam.frameTargetId === sel.id) cam.frameTargetId = null
         } else if (sel.type === 'prop') sc.props = sc.props.filter((p) => p.id !== sel.id)
         else {
           sc.cameras = sc.cameras.filter((c) => c.id !== sel.id)
@@ -604,13 +648,18 @@ export const useStore = create<ShotmachineState>()(
       const cam = st.project.scene.cameras.find((c) => c.id === camId)
       if (!cam) return
       const chars = st.project.scene.characters
-      // 被写体: 選択キャラ or 軸キャラA or 先頭
+      // 被写体はカメラ自身が持つ frameTargetId（null/未設定＝フリー）。
+      // 旧実装は「今の選択」から推測していたため、カメラを選ぶと必ず先頭キャラが対象になっていた。
       const axis = st.project.axis
-      const target =
-        (st.selection?.type === 'character' && chars.find((c) => c.id === st.selection!.id)) ||
-        (axis && chars.find((c) => c.id === axis.charAId)) ||
-        chars[0]
-      if (!target) { set((s) => { s.toast = 'フレーミング対象のキャラクターがいません' }); return }
+      const target = cam.frameTargetId ? chars.find((c) => c.id === cam.frameTargetId) : undefined
+      if (!target) {
+        set((s) => {
+          s.toast = chars.length
+            ? 'このカメラはフリーです。フレーミング対象を選んでください'
+            : 'フレーミング対象のキャラクターがいません'
+        })
+        return
+      }
       const other =
         (axis && chars.find((c) => c.id === (axis.charAId === target.id ? axis.charBId : axis.charAId))) ||
         chars.find((c) => c.id !== target.id)
@@ -646,6 +695,17 @@ export const useStore = create<ShotmachineState>()(
         scheduleShotAutoSync(cam.id)
       })
     },
+
+    // フレーミング対象の切り替え（null=フリー）。フリーはカメラを完全手動で扱うモード
+    setCameraFrameTarget: (cameraId, charId) =>
+      set((st) => {
+        const c = st.project.scene.cameras.find((c) => c.id === cameraId)
+        if (!c) return
+        c.frameTargetId = charId
+        if (!charId) delete st.lastFraming[cameraId]
+        const name = charId ? st.project.scene.characters.find((x) => x.id === charId)?.name : null
+        st.toast = name ? `${c.name} のフレーミング対象を ${name} にしました` : `${c.name} をフリーにしました`
+      }),
 
     setPoseA: () =>
       set((st) => {
@@ -693,7 +753,8 @@ export const useStore = create<ShotmachineState>()(
         shotSize: framing?.size,
         focalLength: poseA.focalLength,
         moveType: poseB ? classifyMove(poseA, poseB) : 'Static',
-        subjectIds: framing?.subjectIds ?? st.project.scene.characters.slice(0, 1).map((c) => c.id),
+        // 被写体はカメラのフレーミング対象が正。フリーカメラは被写体なし（先頭キャラを勝手に入れない）
+        subjectIds: framing?.subjectIds ?? (cam.frameTargetId ? [cam.frameTargetId] : []),
         durationSec: poseB ? cam.moveDurationSec : 3,
         notes: { action: '', camera: '' },
         poseSnapshot: { a: JSON.parse(JSON.stringify(poseA)), b: poseB ? JSON.parse(JSON.stringify(poseB)) : undefined },
@@ -774,8 +835,8 @@ export const useStore = create<ShotmachineState>()(
       if (!at) return
       const shot = stNow.project.shots[at.idx]
       const ar = aspectToNumber(stNow.project.aspect)
-      // 分割点のポーズは shotPose の共有実装で解決（ライブリンク/凍結の分岐を一元化）
-      const splitPose = shotPoseAtU(shot, stNow.project.scene.cameras, moveU(shot, at.tInShot)) ?? shot.poseSnapshot.a
+      // 分割点のポーズは shotPose の共有実装で解決（camKeys/ライブリンク/凍結の分岐を一元化）
+      const splitPose = shotPoseAtLocal(shot, stNow.project.scene.cameras, at.tInShot) ?? shot.poseSnapshot.a
       const thumb = captureFn ? captureFn(splitPose, ar) : null
       set((st) => {
         const split = splitShot(st.project.shots, at.idx, at.tInShot, 0.5, () => genId('shot'))
@@ -783,6 +844,14 @@ export const useStore = create<ShotmachineState>()(
         if (thumb) {
           split[at.idx] = { ...split[at.idx], thumbnailB: thumb }
           split[at.idx + 1] = { ...split[at.idx + 1], thumbnail: thumb }
+        }
+        // camKeys は境界に仮想KFを挿して両側へ振り分ける（分割してもモーションが途切れない）
+        if (shot.camKeys?.length) {
+          const { left, right } = splitCamKeys(shot.camKeys, at.tInShot, shot.durationSec)
+          split[at.idx] = { ...split[at.idx], camKeys: left }
+          split[at.idx + 1] = { ...split[at.idx + 1], camKeys: right }
+          recalcMoveType(split[at.idx], st.project.scene.cameras)
+          recalcMoveType(split[at.idx + 1], st.project.scene.cameras)
         }
         st.project.shots = split
         st.selectedShotId = split[at.idx + 1].id
@@ -794,7 +863,85 @@ export const useStore = create<ShotmachineState>()(
       set((st) => {
         const idx = st.project.shots.findIndex((s) => s.id === shotId)
         if (idx < 0 || idx >= st.project.shots.length - 1) return
+        const left = st.project.shots[idx]
+        const right = st.project.shots[idx + 1]
+        // camKeys は右カットの時刻を左カット尺だけ後ろへずらして連結（境界の重複は畳まれる）
+        const mergedKeys = left.camKeys?.length || right.camKeys?.length
+          ? mergeCamKeys(left.camKeys, left.durationSec, right.camKeys)
+          : undefined
         st.project.shots = mergeShots(st.project.shots, idx)
+        const merged = st.project.shots[idx]
+        if (mergedKeys) {
+          merged.camKeys = mergedKeys
+          recalcMoveType(merged, st.project.scene.cameras)
+        }
+      }),
+
+    // --- カメラKF（カット内ローカル秒） ---
+    // 再生ヘッド位置に、そのカットのカメラの現在ポーズを記録する。
+    // camKeys が空のカットでは、先に従来のA→Bムーブを2キーへ変換してから追加する
+    // （監督が組んだムーブが、最初の1キーを打った瞬間に消えてしまわないようにするため）。
+    addCamKeyframeAtPlayhead: (shotId) => {
+      const stNow = get()
+      const at = cutShotAtTime(stNow.project.shots, stNow.playTime)
+      if (!at) { set((st) => { st.toast = 'カットがありません' }); return }
+      const target = stNow.project.shots[at.idx]
+      if (shotId && target.id !== shotId) {
+        set((st) => { st.toast = '再生ヘッドをそのカットの中に置いてから追加してください' })
+        return
+      }
+      const cam = stNow.project.scene.cameras.find((c) => c.id === target.cameraId)
+      if (!cam) { set((st) => { st.toast = 'このカットのカメラは削除されています' }); return }
+      const tSec = roundTime(at.tInShot)
+      const pose = JSON.parse(JSON.stringify(cam.pose)) as CameraPose
+      set((st) => {
+        const shot = st.project.shots[at.idx]
+        const cams = st.project.scene.cameras
+        let keys = shot.camKeys
+        if (!keys?.length) {
+          const startPose = shotPoseAtLocal(shot, cams, 0)
+          const endPose = shotHasMove(shot, cams) ? shotPoseAtLocal(shot, cams, shot.durationSec) : null
+          keys = camKeysFromAB(
+            JSON.parse(JSON.stringify(startPose ?? pose)),
+            endPose ? JSON.parse(JSON.stringify(endPose)) : null,
+            shot.durationSec,
+          )
+        }
+        shot.camKeys = upsertCamKey(keys, tSec, pose)
+        recalcMoveType(shot, cams)
+        st.animScrub = true
+        st.toast = `カメラKFを記録しました（カット内 ${tSec.toFixed(2)}秒 / 計${shot.camKeys.length}キー）`
+      })
+    },
+    // KFの時刻変更（[0,カット尺]内クランプ）。再生ヘッドを追従させて3Dビューを更新する
+    moveCamKeyframe: (shotId, index, tSec) =>
+      set((st) => {
+        const idx = st.project.shots.findIndex((s) => s.id === shotId)
+        const shot = st.project.shots[idx]
+        if (!shot?.camKeys) return
+        const r = moveCamKey(shot.camKeys, index, tSec, shot.durationSec)
+        shot.camKeys = r.keys
+        recalcMoveType(shot, st.project.scene.cameras)
+        st.playTime = roundTime(shotStarts(st.project.shots)[idx] + r.tSec)
+        st.animScrub = true
+      }),
+    removeCamKeyframe: (shotId, index) =>
+      set((st) => {
+        const shot = st.project.shots.find((s) => s.id === shotId)
+        if (!shot?.camKeys) return
+        shot.camKeys = removeCamKey(shot.camKeys, index)
+        recalcMoveType(shot, st.project.scene.cameras)
+        st.animScrub = true
+      }),
+    // 全消去 → 従来のA/Bムーブ評価に戻る
+    clearCamKeyframes: (shotId) =>
+      set((st) => {
+        const shot = st.project.shots.find((s) => s.id === shotId)
+        if (!shot) return
+        shot.camKeys = undefined
+        recalcMoveType(shot, st.project.scene.cameras)
+        st.animScrub = true
+        st.toast = 'カメラKFを全消去しました（A→Bムーブ評価に戻ります）'
       }),
     // カメラ差し替え（任意タイミングのカットチェンジ後半）。ポーズ凍結＋サムネ再撮影込み
     reassignShotCamera: (shotId, cameraId) => {

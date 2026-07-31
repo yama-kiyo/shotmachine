@@ -1,6 +1,7 @@
-import type { Project, Shot, DialogueClip, Alignment } from './types'
+import type { Project, Shot, DialogueClip, Alignment, CameraKeyframe } from './types'
 import { emptyProject, genId } from './defaults'
 import { shotStarts, roundTime } from '../core/cutTrack'
+import { normalizeCamKeys } from '../core/cameraTrack'
 
 export function serializeProject(p: Project): string {
   return JSON.stringify(p, null, 2)
@@ -99,6 +100,14 @@ export function deserializeProject(json: string): Project {
     if (typeof shot.focalLength !== 'number' || !(shot.focalLength >= 5)) shot.focalLength = 35
     if (typeof shot.notes !== 'object' || shot.notes === null) shot.notes = { action: '', camera: '' }
     if (!Array.isArray(shot.subjectIds)) shot.subjectIds = []
+    // カメラKF: 壊れた要素は捨て、tSec昇順へ正規化。空になったらフィールドごと落とす
+    // （camKeys なし＝従来のA/Bムーブ評価、という優先順位に自然に戻る）
+    if (Array.isArray(shot.camKeys)) {
+      const keys = normalizeCamKeys(shot.camKeys as CameraKeyframe[])
+      shot.camKeys = keys.length ? keys : undefined
+    } else if (shot.camKeys !== undefined) {
+      shot.camKeys = undefined
+    }
     return shot as unknown as Shot
   })
 
@@ -113,7 +122,7 @@ export function deserializeProject(json: string): Project {
     audioTrack = validateAudioTrack(obj.audioTrack)
   }
 
-  return {
+  const project = {
     ...base,
     ...obj,
     version: 2,
@@ -121,4 +130,11 @@ export function deserializeProject(json: string): Project {
     shots,
     audioTrack,
   } as unknown as Project
+
+  // カメラのフレーミング対象: 存在しないキャラを指していたらフリーへ落とす
+  const charIds = new Set(project.scene.characters.map((c) => c.id))
+  for (const cam of project.scene.cameras) {
+    if (cam.frameTargetId && !charIds.has(cam.frameTargetId)) cam.frameTargetId = null
+  }
+  return project
 }
