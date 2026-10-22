@@ -64,7 +64,10 @@ export function TopBar() {
             label: 'プロジェクトを開く…',
             onClick: () => {
               openProjectFile()
-                .then((p) => st.loadProject(p))
+                .then(({ project, warnings }) => {
+                  st.loadProject(project)
+                  if (warnings.length) st.setToast(`読み込み時に調整しました: ${warnings.join(' / ')}`)
+                })
                 .catch((e) => st.setToast(e instanceof Error ? e.message : '読み込みに失敗しました'))
             },
           },

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { serializeProject, deserializeProject } from '../serialization'
+import { serializeProject, deserializeProject, deserializeProjectWithReport } from '../serialization'
 import { sampleProject } from '../defaults'
-import { isValidVoiceId, safeJsonParse, MAX_PROJECT_FILE_BYTES } from '../sanitize'
+import { isValidVoiceId, safeJsonParse, MAX_PROJECT_FILE_BYTES, LIMITS, STR_LIMITS } from '../sanitize'
 import { ttsWithTimestamps } from '../../services/elevenlabs'
 
 const JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ=='
@@ -106,5 +106,99 @@ describe('ElevenLabs 呼び出しの voiceId 検証', () => {
     await expect(ttsWithTimestamps('こんにちは', '9BWtsMINqrJLrRacOk9x')).rejects.toThrow(/401/)
     const url = String((fetchSpy.mock.calls[0] as unknown[])[0])
     expect(url.startsWith('https://api.elevenlabs.io/v1/text-to-speech/9BWtsMINqrJLrRacOk9x/with-timestamps')).toBe(true)
+  })
+})
+
+describe('列挙値の正規化（描画で落ちないように）', () => {
+  const baseShot = (o: Record<string, any>) => ({
+    id: 's1', cameraId: 'cam_a', cameraName: 'CAM A', focalLength: 35, subjectIds: [],
+    durationSec: 3, notes: { action: '', camera: '' }, poseSnapshot: { a: o.scene.cameras[0].pose }, thumbnail: '',
+  })
+  it('moveType 欠落・未知・非文字列は Static に（v2）', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.shots = [
+        baseShot(o),
+        { ...baseShot(o), id: 's2', moveType: 'Teleport' },
+        { ...baseShot(o), id: 's3', moveType: 42 },
+        { ...baseShot(o), id: 's4', moveType: 'Pan' },
+      ]
+    }))
+    expect(p.shots.map((s) => s.moveType)).toEqual(['Static', 'Static', 'Static', 'Pan'])
+  })
+  it('moveType 欠落は v1 移設ファイルでも Static に', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.version = 1
+      delete o.audioTrack
+      o.shots = [{ ...baseShot(o), dialogue: { speaker: 'Maya', text: 123, alignment: { chars: [1], starts: [0], ends: [1] } } }]
+    }))
+    expect(p.shots[0].moveType).toBe('Static')
+    expect(p.audioTrack[0].text).toBe('')
+    expect(p.audioTrack[0].alignment).toBeUndefined()
+  })
+  it('shotSize・姿勢・腕・体型・時間帯の不正値は既定へ', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.shots = [{ ...baseShot(o), shotSize: 'HUGE', notes: { action: 5 } }]
+      o.scene.characters[0].poseState = 'fly'
+      o.scene.characters[0].armPose = { x: 1 }
+      o.scene.characters[0].bodyType = 'giant'
+      o.scene.characters[0].keyframes = [{ time: 0, position: { x: 0, y: 0, z: 0 }, poseState: 'fly', armPose: 'x' }, { time: 'a' }]
+      o.scene.timeOfDay = 'midnight'
+    }))
+    expect(p.shots[0].shotSize).toBeUndefined()
+    expect(p.shots[0].notes).toEqual({ action: '', camera: '' })
+    const c = p.scene.characters[0]
+    expect([c.poseState, c.armPose, c.bodyType]).toEqual([undefined, undefined, undefined])
+    expect(c.keyframes).toHaveLength(1)
+    expect(c.keyframes![0].poseState).toBe('stand')
+    expect(c.keyframes![0].armPose).toBe('natural')
+    expect(p.scene.timeOfDay).toBeUndefined()
+  })
+})
+
+describe('件数・文字数の上限（巨大ファイルでタブが固まらないように）', () => {
+  it('20,000 キャラは上限まで切り詰めて通知、短時間で読み込める', () => {
+    const json = tamper((o) => {
+      const c0 = o.scene.characters[0]
+      o.scene.characters = Array.from({ length: 20_000 }, (_, i) => ({ ...c0, id: `c${i}`, name: `C${i}` }))
+    })
+    const t0 = performance.now()
+    const { project, warnings } = deserializeProjectWithReport(json)
+    const ms = performance.now() - t0
+    expect(project.scene.characters).toHaveLength(LIMITS.characters)
+    expect(warnings.join()).toMatch(/キャラクター.*20000件中/)
+    expect(ms).toBeLessThan(2000)
+  })
+  it('カメラ・プロップ・カット・音声クリップ・ボイス割当も上限で切る', () => {
+    const { project: p, warnings } = deserializeProjectWithReport(tamper((o) => {
+      const cam = o.scene.cameras[0]
+      o.scene.cameras = Array.from({ length: LIMITS.cameras + 5 }, (_, i) => ({ ...cam, id: `k${i}` }))
+      const pr = o.scene.props[0]
+      o.scene.props = Array.from({ length: LIMITS.props + 5 }, (_, i) => ({ ...pr, id: `p${i}` }))
+      o.shots = Array.from({ length: LIMITS.shots + 5 }, (_, i) => ({
+        id: `s${i}`, cameraId: 'cam_a', cameraName: 'A', moveType: 'Static', focalLength: 35, subjectIds: [],
+        durationSec: 1, notes: { action: '', camera: '' }, poseSnapshot: { a: cam.pose }, thumbnail: '',
+      }))
+      o.audioTrack = Array.from({ length: LIMITS.audioClips + 5 }, (_, i) => ({ id: `a${i}`, speaker: null, text: 't', startSec: i, durationSec: 1 }))
+      o.voiceMap = Object.fromEntries(Array.from({ length: LIMITS.voiceMap + 5 }, (_, i) => [`S${i}`, '9BWtsMINqrJLrRacOk9x']))
+    }))
+    expect(p.scene.cameras).toHaveLength(LIMITS.cameras)
+    expect(p.scene.props).toHaveLength(LIMITS.props)
+    expect(p.shots).toHaveLength(LIMITS.shots)
+    expect(p.audioTrack).toHaveLength(LIMITS.audioClips)
+    expect(Object.keys(p.voiceMap!)).toHaveLength(LIMITS.voiceMap)
+    expect(warnings).toHaveLength(5)
+  })
+  it('名前・スラッグライン・台本テキストの長さを切る', () => {
+    const { project: p, warnings } = deserializeProjectWithReport(tamper((o) => {
+      o.name = 'n'.repeat(10_000)
+      o.slugline = 's'.repeat(10_000)
+      o.scriptRaw = 'x'.repeat(STR_LIMITS.scriptRaw + 10)
+      o.scene.characters[0].name = 'c'.repeat(10_000)
+    }))
+    expect(p.name).toHaveLength(STR_LIMITS.name)
+    expect(p.slugline).toHaveLength(STR_LIMITS.slugline)
+    expect(p.scriptRaw).toHaveLength(STR_LIMITS.scriptRaw)
+    expect(p.scene.characters[0].name).toHaveLength(STR_LIMITS.objName)
+    expect(warnings.join()).toMatch(/台本テキスト/)
   })
 })

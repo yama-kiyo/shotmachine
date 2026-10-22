@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { ErrorBoundary } from './ui/ErrorBoundary'
 import './styles.css'
 import { useStore } from './state/store'
 import { animaticPoseAt, shotPoseAtLocal, shotHasMove } from './core/shotPose'
@@ -15,6 +16,8 @@ w.__shotmachine_test__ = { animaticPoseAt, shotPoseAtLocal, shotHasMove, shotToP
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 )
