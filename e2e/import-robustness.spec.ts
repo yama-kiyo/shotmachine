@@ -49,7 +49,48 @@ test('描画エラー時はエラー境界が復帰手段を出し、新規プ�
   await expect(boundary).toBeVisible()
   // データやスタックトレースは表示しない
   await expect(boundary).not.toContainText(/TypeError|at |\.tsx|\.js/)
+  // 履歴のスロットル（400ms）を超えてから復帰操作する＝壊れた状態が Undo 履歴に積まれる実使用の条件
+  await page.waitForTimeout(800)
   await page.getByTestId('error-boundary-reset').click()
   await expect(page.getByTestId('menu-file')).toBeVisible()
   await expect(boundary).toHaveCount(0)
+  // 復帰後に Undo しても壊れた状態へ戻らない（Undo 履歴を消している）
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Control+z')
+  await page.waitForTimeout(300)
+  await expect(boundary).toHaveCount(0)
+  await expect(page.getByTestId('menu-file')).toBeVisible()
+})
+
+test('極端な値（カット尺 1e307・部屋幅 1e9）のファイルでもタイムラインと配置図書き出しが短時間で終わる', async ({ page }) => {
+  test.setTimeout(60_000)
+  const errors: string[] = []
+  page.on('pageerror', (e) => errors.push(e.message))
+  await page.goto('/')
+  await openProject(page, {
+    version: 2,
+    scene: {
+      room: { width: 1e9, depth: 1e9, wallHeight: 1e9, showBackWall: true, showSideWall: true },
+      characters: [], cameras: [camera], props: [],
+    },
+    shots: [{ poseSnapshot: { a: pose }, moveType: 'Static', durationSec: 1e307 }],
+  })
+  const t0 = Date.now()
+  await page.getByTestId('tab-timeline').click()
+  await expect(page.getByTestId('timeline-view')).toBeVisible()
+  const timelineMs = Date.now() - t0
+  expect(timelineMs).toBeLessThan(5000)
+  const timings: Record<string, number> = { timelineMs }
+  for (const label of ['機材配置図 PNG', '機材配置図 PDF']) {
+    await page.getByTestId('menu-export').click()
+    const dl = page.waitForEvent('download', { timeout: 10_000 })
+    const t1 = Date.now()
+    await page.getByText(label).click()
+    await dl
+    timings[label] = Date.now() - t1
+    expect(timings[label]).toBeLessThan(5000)
+  }
+  test.info().annotations.push({ type: 'timings', description: JSON.stringify(timings) })
+  console.log('[extreme-values timings]', JSON.stringify(timings))
+  await expect(page.getByTestId('error-boundary')).toHaveCount(0)
+  expect(errors).toEqual([])
 })

@@ -21,6 +21,8 @@ export class ErrorBoundary extends Component<Props, State> {
   private restartWithNewProject = (): void => {
     try {
       useStore.getState().newProject(false)
+      // Undo 履歴（zundo）に壊れた状態が残っていると Ctrl+Z で戻ってしまうため消す
+      useStore.temporal.getState().clear()
     } catch {
       // ストア自体が壊れている場合は再読み込みに任せる
     }

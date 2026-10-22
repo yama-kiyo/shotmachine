@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { serializeProject, deserializeProject, deserializeProjectWithReport } from '../serialization'
 import { sampleProject } from '../defaults'
-import { isValidVoiceId, safeJsonParse, MAX_PROJECT_FILE_BYTES, LIMITS, STR_LIMITS } from '../sanitize'
+import { isValidVoiceId, safeJsonParse, MAX_PROJECT_FILE_BYTES, LIMITS, STR_LIMITS, TIME_LIMITS, ROOM_LIMITS } from '../sanitize'
+import { rulerTicks, gridPositions, MAX_RULER_TICKS, MAX_GRID_LINES } from '../../core/ruler'
 import { ttsWithTimestamps } from '../../services/elevenlabs'
 
 const JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ=='
@@ -200,5 +201,107 @@ describe('件数・文字数の上限（巨大ファイルでタブが固まら�
     expect(p.scriptRaw).toHaveLength(STR_LIMITS.scriptRaw)
     expect(p.scene.characters[0].name).toHaveLength(STR_LIMITS.objName)
     expect(warnings.join()).toMatch(/台本テキスト/)
+  })
+})
+
+describe('極端な時間値・寸法（B1/B2）', () => {
+  const H6 = TIME_LIMITS.perItemSec
+  const H24 = TIME_LIMITS.timelineSec
+  const shotWith = (o: Record<string, any>, extra: Record<string, unknown>) => ({
+    id: 's', cameraId: 'cam_a', cameraName: 'A', moveType: 'Static', focalLength: 35, subjectIds: [],
+    notes: { action: '', camera: '' }, poseSnapshot: { a: o.scene.cameras[0].pose }, thumbnail: '', durationSec: 3, ...extra,
+  })
+  // JSON では 1e309 が Infinity として読まれる。NaN は表現できないため文字列・null で代用
+  it('カット尺: 1e307 は上限へ、NaN相当・Infinity・負・0 は既定値 3 へ', () => {
+    const json = tamper((o) => {
+      o.shots = [1e307, 'NaN', null, -5, 0, 2.5].map((d, i) => shotWith(o, { id: `s${i}`, durationSec: d }))
+    }).replace('"durationSec":null', '"durationSec":1e309')
+    const p = deserializeProject(json)
+    const ds = p.shots.map((s) => s.durationSec)
+    expect(ds[0]).toBe(H6)
+    expect(ds.slice(1, 5)).toEqual([3, 3, 3, 3]) // 'NaN' 文字列・Infinity(1e309)・負・0
+    expect(ds[5]).toBe(2.5)
+    expect(ds.every((d) => Number.isFinite(d) && d > 0 && d <= H6)).toBe(true)
+  })
+  it('カット尺の合計が24時間を超えたら以降を切り捨てて通知', () => {
+    const { project, warnings } = deserializeProjectWithReport(tamper((o) => {
+      o.shots = Array.from({ length: 5 }, (_, i) => shotWith(o, { id: `s${i}`, durationSec: H6 }))
+    }))
+    expect(project.shots).toHaveLength(4)
+    expect(warnings.join()).toMatch(/24時間/)
+  })
+  it('クリップ・カメラKF・キャラKF・ムーブ尺・alignment の巨大値は上限へ（Infinity にならない）', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.shots = [shotWith(o, { camKeys: [{ tSec: 1e307, pose: o.scene.cameras[0].pose }], moveRange: [-5, 7] })]
+      o.audioTrack = [{ id: 'a', speaker: 'Maya', text: 't', startSec: 1e307, durationSec: 1e307,
+        alignment: { chars: ['あ'], starts: [1e307], ends: [-1] } }]
+      o.scene.characters[0].keyframes = [{ time: 1e307, position: { x: 0, y: 0, z: 0 } }]
+      o.scene.cameras[0].moveDurationSec = 1e307
+      o.scene.props[0].lightIntensity = 1e9
+    }))
+    expect(p.shots[0].camKeys![0].tSec).toBe(H6)
+    expect(p.shots[0].moveRange).toEqual([0, 1])
+    expect(p.audioTrack[0].startSec).toBe(H24)
+    expect(p.audioTrack[0].durationSec).toBe(H6)
+    expect(p.audioTrack[0].alignment).toEqual({ chars: ['あ'], starts: [H6], ends: [0] })
+    expect(p.scene.characters[0].keyframes![0].time).toBe(H24)
+    expect(p.scene.cameras[0].moveDurationSec).toBe(H6)
+    expect(p.scene.props[0].lightIntensity).toBe(10)
+  })
+  it('v1 移設: alignment 末尾が巨大でもクリップ尺は上限内', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.version = 1
+      delete o.audioTrack
+      o.shots = [shotWith(o, { dialogue: { speaker: 'Maya', text: 'x', alignment: { chars: ['x'], starts: [0], ends: [1e307] } } })]
+    }))
+    expect(p.audioTrack[0].durationSec).toBe(H6)
+  })
+  it('部屋寸法: 1e9 は上限へ、壁位置もクランプ', () => {
+    const p = deserializeProject(tamper((o) => {
+      o.scene.room = { width: 1e9, depth: 1e309, wallHeight: 1e9, showBackWall: true, showSideWall: true, backWallZ: -1e9, sideWallX: 'x' }
+    }).replace('"depth":null', '"depth":1e309'))
+    expect(p.scene.room.width).toBe(ROOM_LIMITS.size)
+    expect(p.scene.room.depth).toBe(6) // Infinity → 既定値
+    expect(p.scene.room.wallHeight).toBe(ROOM_LIMITS.wallHeight)
+    expect(p.scene.room.backWallZ).toBe(-ROOM_LIMITS.size)
+    expect(p.scene.room.sideWallX).toBeUndefined()
+  })
+})
+
+describe('目盛り・グリッドの本数上限（B1/B2）', () => {
+  it('rulerTicks: 通常は step 間隔、巨大な尺でも上限本数・短時間', () => {
+    expect(rulerTicks(3, 1)).toEqual([0, 1, 2, 3])
+    const t0 = performance.now()
+    const big = rulerTicks(1e307, 0.5)
+    expect(big.length).toBeLessThanOrEqual(MAX_RULER_TICKS + 1)
+    expect(rulerTicks(86400, 0.5).length).toBeLessThanOrEqual(MAX_RULER_TICKS + 1)
+    expect(performance.now() - t0).toBeLessThan(200)
+    expect(rulerTicks(Number.NaN, 1)).toEqual([])
+    expect(rulerTicks(10, 0)).toEqual([])
+  })
+  it('gridPositions: 8m は -4..4 の1m間隔、巨大寸法は間引いて上限本数', () => {
+    expect(gridPositions(8)).toEqual([-4, -3, -2, -1, 0, 1, 2, 3, 4])
+    expect(gridPositions(1e9).length).toBeLessThanOrEqual(MAX_GRID_LINES + 1)
+    expect(gridPositions(Infinity)).toEqual([])
+  })
+})
+
+describe('TTS 感情タグ（B4）', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('emotion が constructor 等でも関数の中身を本文に混ぜない', async () => {
+    const bodies: string[] = []
+    vi.stubGlobal('localStorage', { getItem: () => 'sk_dummy_test_key' })
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: RequestInit) => {
+      bodies.push(String(init.body))
+      return new Response('unauthorized', { status: 401 })
+    }))
+    for (const emo of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      await expect(ttsWithTimestamps('こんにちは', '9BWtsMINqrJLrRacOk9x', emo)).rejects.toThrow(/401/)
+    }
+    for (const b of bodies) {
+      const text = JSON.parse(b).text as string
+      expect(text).not.toMatch(/function|native code|\[object/)
+    }
+    expect(JSON.parse(bodies[0]).text).toBe('[constructor] こんにちは')
   })
 })

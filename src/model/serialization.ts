@@ -1,7 +1,7 @@
 import type { Project, Shot, DialogueClip, Alignment, CameraKeyframe } from './types'
 import { emptyProject, genId, PROP_CATALOG } from './defaults'
 import {
-  MAX_PROJECT_FILE_BYTES, LIMITS, STR_LIMITS, safeJsonParse, isPlainObject, isSafeImageDataUrl, isSafeAudioDataUrl,
+  MAX_PROJECT_FILE_BYTES, LIMITS, STR_LIMITS, TIME_LIMITS, clampTime, clampDuration, safeJsonParse, isPlainObject, isSafeImageDataUrl, isSafeAudioDataUrl,
   isValidVoiceId, sanitizeScene, sanitizeTopLevel, sanitizeShotFields, sanitizeAlignment, capArray, capStr,
   newReport, type SanitizeReport,
 } from './sanitize'
@@ -46,8 +46,8 @@ function migrateV1toV2(shots: Shot[]): { shots: Shot[]; audioTrack: DialogueClip
       voiceId: dlg.voiceId,
       audio: dlg.audio,
       alignment: dlg.alignment,
-      startSec: roundTime(starts[i]),
-      durationSec: roundTime(durationSec > 0 ? durationSec : shot.durationSec),
+      startSec: roundTime(clampTime(starts[i], TIME_LIMITS.timelineSec, 0)),
+      durationSec: roundTime(clampDuration(durationSec, TIME_LIMITS.perItemSec, shot.durationSec)),
     }
     audioTrack.push(clip)
     return { ...base, source: 'script' as const, clipId: clip.id }
@@ -67,6 +67,9 @@ function sanitizeClipFields(clip: Record<string, unknown>): void {
   if (clip.emotion !== undefined) clip.emotion = typeof clip.emotion === 'string' ? capStr(clip.emotion, STR_LIMITS.emotion) : undefined
   // alignment.chars は描画・リップシンクで文字列メソッドに渡る。要素の型と長さを揃える
   if (clip.alignment !== undefined) clip.alignment = sanitizeAlignment(clip.alignment)
+  // 時刻: NaN・Infinity・負は既定値、巨大値は上限で丸める（roundTime の ×100 で Infinity にしない）
+  clip.startSec = roundTime(clampTime(clip.startSec, TIME_LIMITS.timelineSec, 0))
+  clip.durationSec = roundTime(clampDuration(clip.durationSec, TIME_LIMITS.perItemSec, 1))
 }
 
 // v2 読込時の audioTrack 防御的検証: 壊れた要素は捨て、不正・巨大な audio 文字列は除去。
@@ -79,8 +82,6 @@ function validateAudioTrack(raw: unknown, report: SanitizeReport): DialogueClip[
     .map((c) => {
       const clip = { ...c } as Record<string, unknown>
       sanitizeClipFields(clip)
-      clip.startSec = roundTime(Math.max(0, clip.startSec as number))
-      clip.durationSec = roundTime(clip.durationSec as number)
       return clip as unknown as DialogueClip
     })
 }
@@ -123,7 +124,13 @@ export function deserializeProjectWithReport(json: string): { project: Project; 
   const shotObjs = rawShots.filter(isPlainObject)
     .map((s) => sanitizeShotFields(s))
     .filter((s): s is Record<string, unknown> => s !== null)
-  const validShots = capArray(shotObjs, LIMITS.shots, 'カット', report).map((shot) => {
+  // カット尺の合計も上限（タイムライン長）。超えたら以降のカットを切り捨てて通知
+  let acc = 0
+  const withinTotal = shotObjs.filter((s) => (acc += s.durationSec as number) <= TIME_LIMITS.timelineSec)
+  if (withinTotal.length < shotObjs.length) {
+    report.warnings.push(`カット尺の合計が${TIME_LIMITS.timelineSec / 3600}時間を超えるため、先頭${withinTotal.length}カットのみ読み込みました`)
+  }
+  const validShots = capArray(withinTotal, LIMITS.shots, 'カット', report).map((shot) => {
     if (!isSafeImageDataUrl(shot.thumbnail)) shot.thumbnail = ''
     if (shot.thumbnailB !== undefined && !isSafeImageDataUrl(shot.thumbnailB)) shot.thumbnailB = undefined
     // カメラKF: 壊れた要素は捨て、tSec昇順へ正規化。空になったらフィールドごと落とす

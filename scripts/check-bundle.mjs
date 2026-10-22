@@ -64,6 +64,9 @@ const PATTERNS = [
   ['private-key-block', /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/g],
 ]
 
+// 本番ビルドに残ってはいけない E2E 用フック（main.tsx。--mode e2e のときだけ入る）
+PATTERNS.push(['e2e-test-hook (__shotmachine_test__)', /__shotmachine_test__/g])
+
 // ---- 3. ビルド環境の秘密値そのもの（define 等で焼き込まれた場合の検出） ----
 const literalSecrets = Object.entries(process.env)
   .filter(([name, v]) => /(KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof v === 'string' && v.trim().length >= 16)

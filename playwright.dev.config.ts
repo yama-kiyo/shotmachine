@@ -14,9 +14,9 @@ export default defineConfig({
     },
   },
   webServer: {
-    command: 'npx vite preview --port 5189 --strictPort',
+    command: 'npm run build:e2e && npx vite preview --outDir dist-e2e --port 5189 --strictPort',
     url: 'http://localhost:5189/',
     reuseExistingServer: false,
-    timeout: 60_000,
+    timeout: 120_000,
   },
 })

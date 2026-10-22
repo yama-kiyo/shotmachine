@@ -7,6 +7,8 @@ export const MAX_PROJECT_FILE_BYTES = 64 * 1024 * 1024
 // dataURL 1本あたりの上限文字数（メモリ保護）
 export const MAX_DATA_URL_CHARS = 5_000_000
 
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
 // 配列の件数上限（実用より十分大きく、UI が固まらない範囲。超過分は切り捨てて利用者に通知する）
 // 3D 表示はキャラ・カメラ・プロップ1つごとにメッシュ（VRM なら数MB級）を持つため、件数を厳しめにする
 export const LIMITS = {
@@ -34,6 +36,23 @@ export const STR_LIMITS = {
   speaker: 100,
   emotion: 50,
 } as const
+
+// 時間の上限（秒）。巨大値はタイムラインの目盛り生成や roundTime(×100) で Infinity・停止を招くため上限で丸める。
+// NaN・Infinity・負の値は既定値に戻す
+export const TIME_LIMITS = {
+  perItemSec: 6 * 3600, // カット尺・クリップ尺・ムーブ尺・カメラKF時刻（1本あたり6時間）
+  timelineSec: 24 * 3600, // タイムライン上の絶対時刻（クリップ開始・キャラKF時刻）と、カット尺の合計
+} as const
+
+// 部屋の寸法上限（m）。配置図は1mごとに線を引くため巨大値で書き出しが止まる
+export const ROOM_LIMITS = { size: 200, wallHeight: 50 } as const
+
+// 時間値: 有限かつ 0 以上なら上限で丸め、それ以外（NaN・Infinity・負）は既定値
+export const clampTime = (v: unknown, max: number, fallback: number): number =>
+  isNum(v) && v >= 0 ? Math.min(v, max) : fallback
+// 正の時間値（尺）: 0 以下・NaN・Infinity は既定値
+export const clampDuration = (v: unknown, max: number, fallback: number): number =>
+  isNum(v) && v > 0 ? Math.min(v, max) : fallback
 
 // 読込時に切り捨て・補正した内容の記録（利用者への通知用）
 export interface SanitizeReport {
@@ -71,7 +90,6 @@ export const isHexColor = (v: unknown): v is string => typeof v === 'string' && 
 export const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
-const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
 // ---- 列挙値（types.ts と一致させる。描画で表引き・文字列メソッドに使われる） ----
 export const MOVE_TYPES = [
@@ -144,8 +162,8 @@ export function sanitizeAlignment(raw: unknown): Record<string, unknown> | undef
     const e = raw.ends[i]
     if (typeof c !== 'string' || !isNum(s) || !isNum(e)) return undefined
     chars.push(c.slice(0, 8))
-    starts.push(s)
-    ends.push(e)
+    starts.push(clampTime(s, TIME_LIMITS.perItemSec, 0))
+    ends.push(clampTime(e, TIME_LIMITS.perItemSec, 0))
   }
   return { chars, starts, ends }
 }
@@ -177,6 +195,7 @@ export function sanitizeScene(
       const kfs = Array.isArray(o.keyframes)
         ? o.keyframes.filter(isPlainObject).filter((k) => isNum(k.time) && isVec3(k.position)).map((k) => ({
           ...k,
+          time: clampTime(k.time, TIME_LIMITS.timelineSec, 0),
           rotationY: isNum(k.rotationY) ? k.rotationY : 0,
           poseState: normEnum(POSE_STATES, k.poseState, 'stand'),
           armPose: normEnum(ARM_POSES, k.armPose, 'natural'),
@@ -196,7 +215,7 @@ export function sanitizeScene(
     o.pose = sanitizePose(o.pose)
     if (o.poseA !== undefined) o.poseA = sanitizePose(o.poseA)
     if (o.poseB !== undefined) o.poseB = sanitizePose(o.poseB)
-    if (!isNum(o.moveDurationSec) || !(o.moveDurationSec > 0)) o.moveDurationSec = 4
+    o.moveDurationSec = clampDuration(o.moveDurationSec, TIME_LIMITS.perItemSec, 4)
     if (o.frameTargetId !== undefined && o.frameTargetId !== null && typeof o.frameTargetId !== 'string') o.frameTargetId = null
     return o
   })
@@ -213,18 +232,24 @@ export function sanitizeScene(
     if (!isVec3(o.scale)) o.scale = { x: 1, y: 1, z: 1 }
     if (!isNum(o.rotationY)) o.rotationY = 0
     if (o.lightOn !== undefined && typeof o.lightOn !== 'boolean') delete o.lightOn
-    if (o.lightIntensity !== undefined && !isNum(o.lightIntensity)) delete o.lightIntensity
+    if (o.lightIntensity !== undefined) {
+      if (!isNum(o.lightIntensity)) delete o.lightIntensity
+      else o.lightIntensity = Math.min(Math.max(o.lightIntensity, 0), 10)
+    }
     return o
   })
   const room = isPlainObject(scene.room) ? { ...scene.room } : { ...baseRoom }
   for (const k of ['width', 'depth', 'wallHeight']) {
-    if (!isNum(room[k]) || !((room[k] as number) > 0)) room[k] = baseRoom[k]
+    const max = k === 'wallHeight' ? ROOM_LIMITS.wallHeight : ROOM_LIMITS.size
+    room[k] = isNum(room[k]) && (room[k] as number) > 0 ? Math.min(room[k] as number, max) : baseRoom[k]
   }
   for (const k of ['showBackWall', 'showSideWall']) {
     if (typeof room[k] !== 'boolean') room[k] = baseRoom[k]
   }
   for (const k of ['backWallZ', 'sideWallX']) {
-    if (room[k] !== undefined && !isNum(room[k])) delete room[k]
+    if (room[k] === undefined) continue
+    if (!isNum(room[k])) delete room[k]
+    else room[k] = Math.min(Math.max(room[k] as number, -ROOM_LIMITS.size), ROOM_LIMITS.size)
   }
   for (const k of ['floorColor', 'wallColor']) {
     if (room[k] !== undefined && !isHexColor(room[k])) delete room[k]
@@ -251,7 +276,7 @@ export function sanitizeShotFields(s: Record<string, unknown>): Record<string, u
   shot.moveType = normEnum(MOVE_TYPES, shot.moveType, 'Static')
   if (shot.shotSize !== undefined) shot.shotSize = optEnum(SHOT_SIZES, shot.shotSize)
   if (shot.source !== undefined) shot.source = optEnum(['script', 'capture'] as const, shot.source)
-  if (!isNum(shot.durationSec) || !(shot.durationSec > 0)) shot.durationSec = 3
+  shot.durationSec = clampDuration(shot.durationSec, TIME_LIMITS.perItemSec, 3)
   if (!isNum(shot.focalLength) || !(shot.focalLength >= 5)) shot.focalLength = 35
   const notes = isPlainObject(shot.notes) ? shot.notes : {}
   shot.notes = { action: capStr(notes.action, STR_LIMITS.notes), camera: capStr(notes.camera, STR_LIMITS.notes) }
@@ -260,10 +285,13 @@ export function sanitizeShotFields(s: Record<string, unknown>): Record<string, u
     : []
   if (shot.moveRange !== undefined) {
     const r = shot.moveRange
-    shot.moveRange = Array.isArray(r) && r.length === 2 && isNum(r[0]) && isNum(r[1]) ? [r[0], r[1]] : undefined
+    const c01 = (x: number): number => Math.min(Math.max(x, 0), 1)
+    shot.moveRange = Array.isArray(r) && r.length === 2 && isNum(r[0]) && isNum(r[1]) ? [c01(r[0]), c01(r[1])] : undefined
   }
-  if (Array.isArray(shot.camKeys) && shot.camKeys.length > LIMITS.camKeys) {
-    shot.camKeys = shot.camKeys.slice(0, LIMITS.camKeys)
+  if (Array.isArray(shot.camKeys)) {
+    // KF 時刻はカット内ローカル秒。巨大値は roundT(×100) で Infinity になるため先に上限で丸める
+    shot.camKeys = shot.camKeys.slice(0, LIMITS.camKeys).map((k) =>
+      isPlainObject(k) && isNum(k.tSec) ? { ...k, tSec: clampTime(k.tSec, TIME_LIMITS.perItemSec, 0) } : k)
   }
   if (shot.clipId !== undefined && typeof shot.clipId !== 'string') shot.clipId = undefined
   return shot

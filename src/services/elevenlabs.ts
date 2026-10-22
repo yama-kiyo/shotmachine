@@ -50,7 +50,8 @@ function emotionTag(emotion?: string): string {
     喜び: '[happy] ', 笑: '[laughs] ', 驚き: '[surprised] ', 驚: '[surprised] ',
     囁き: '[whispers] ', ささやき: '[whispers] ', 叫び: '[shouting] ',
   }
-  return map[emotion] ?? `[${emotion}] `
+  // 'constructor' 等の継承プロパティ（関数）を本文に混ぜない
+  return Object.hasOwn(map, emotion) ? map[emotion] : `[${emotion}] `
 }
 
 export async function ttsWithTimestamps(

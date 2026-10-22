@@ -29,7 +29,7 @@ npm run build
 ```bash
 npm run dev        # 開発サーバー
 npm test           # 単体テスト（Vitest）
-npm run e2e        # E2Eテスト（Playwright・要ビルド済みdist）
+npm run e2e        # E2Eテスト（Playwright。テスト用フック入りの dist-e2e を自動ビルドして CSP 付き preview で検証）
 ```
 
 APIキー（いずれも任意）は**起動後の画面から入力**します（BYOK）。キーはそのブラウザの localStorage にのみ保存され、各APIへの直接呼び出し以外には送信されません。画面の🔑✕／削除ボタンでいつでも消せます。
@@ -53,7 +53,8 @@ APIキー（いずれも任意）は**起動後の画面から入力**します�
 
 ## 注意
 
-- `.env`・`dist/` はコミット対象外（.gitignore済み）
+- `.env`・`dist/`・`dist-e2e/` はコミット対象外（.gitignore済み）
+- E2E 用フック（`window.useStore` 等）は開発サーバーと `npm run build:e2e` のビルドにだけ入り、本番の `npm run build` には入りません（check-bundle が検査）
 - APIキーはブラウザのlocalStorageのみ（BYOK）。外部送信はElevenLabs / Anthropic APIへの直接呼び出しのみ
 - プロジェクトファイル（.shotmachine.json）の読込は上限64MB・型検証・`__proto__` 等の危険キー除去・サムネイル/音声は base64 dataURL のみ・voice_id は英数字のみ（`src/model/sanitize.ts`）
 
