@@ -6,6 +6,7 @@ import { useRef, useState, useMemo } from 'react'
 import { useStore, totalAnimaticDuration } from '../state/store'
 import { shotStarts } from '../core/cutTrack'
 import { snapTime, nearestGrid } from '../core/snap'
+import { rulerTicks } from '../core/ruler'
 import { shotNumber } from '../core/promptGen'
 import type { Vec3 } from '../core/math'
 
@@ -292,8 +293,8 @@ export function TimelineTab() {
 
   // ルーラー目盛り
   const step = tickStep(pxPerSec)
-  const ticks: number[] = []
-  for (let t = 0; t <= total + 1e-6; t += step) ticks.push(Math.round(t * 100) / 100)
+  // 本数に上限あり（巨大な尺でもループで固まらない）
+  const ticks = rulerTicks(total, step)
 
   return (
     <div

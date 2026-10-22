@@ -76,7 +76,7 @@ function BoardTab() {
               )}
               {s.moveType !== 'Static' && (
                 <div className="move-arrow" style={{ alignItems: 'flex-start', justifyContent: 'flex-start', padding: 8, fontSize: 14 }}>
-                  {MOVE_GLYPHS[s.moveType] || s.moveType.toUpperCase()}
+                  {MOVE_GLYPHS[s.moveType] || String(s.moveType ?? '').toUpperCase()}
                 </div>
               )}
             </div>

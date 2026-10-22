@@ -5,6 +5,7 @@ import type { Project, Prop, CameraRig, Character } from '../model/types'
 import { PROP_CATALOG } from '../model/defaults'
 import { downloadBlob, downloadDataUrl } from './download'
 import { deg } from '../core/math'
+import { gridPositions } from '../core/ruler'
 
 const PAGE_W = 1754 // A4横 150dpi
 const PAGE_H = 1240
@@ -105,10 +106,11 @@ export function renderFloorPlanCanvas(project: Project): HTMLCanvasElement {
   ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
   ctx.strokeStyle = '#dddddd'
   ctx.lineWidth = 1
-  for (let gx = Math.ceil(-room.width / 2); gx <= room.width / 2; gx++) {
+  // 線の本数に上限あり（巨大な部屋寸法でも書き出しが固まらない。多い場合は間引く）
+  for (const gx of gridPositions(room.width)) {
     ctx.beginPath(); ctx.moveTo(t.toX(gx), y0); ctx.lineTo(t.toX(gx), y1); ctx.stroke()
   }
-  for (let gz = Math.ceil(-room.depth / 2); gz <= room.depth / 2; gz++) {
+  for (const gz of gridPositions(room.depth)) {
     ctx.beginPath(); ctx.moveTo(x0, t.toY(gz)); ctx.lineTo(x1, t.toY(gz)); ctx.stroke()
   }
   ctx.strokeStyle = '#222'

@@ -16,7 +16,8 @@ export default defineConfig({
   webServer: {
     // ビルド済みdistを配信（Dropboxドライブ上でdevサーバーの依存最適化が遅いため）
     // reuseExistingServer: false — 残留サーバーを掴んで別バージョンを検証する事故の再発防止
-    command: 'npx vite preview --port 5183 --strictPort',
+    // E2E 用ビルド（テスト用フック入り・本番の dist とは別フォルダ）を CSP 付き preview で配信
+    command: 'npm run build:e2e && npx vite preview --outDir dist-e2e --port 5183 --strictPort',
     url: 'http://localhost:5183/',
     reuseExistingServer: false,
     timeout: 120_000,

@@ -1,6 +1,7 @@
 # 依存・ビルド（distはAPIキー埋め込みのため絶対にコミットしない）
 node_modules/
 dist/
+dist-e2e/
 *.tsbuildinfo
 
 # 秘密情報
