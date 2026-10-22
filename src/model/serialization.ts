@@ -1,13 +1,15 @@
 import type { Project, Shot, DialogueClip, Alignment, CameraKeyframe } from './types'
-import { emptyProject, genId } from './defaults'
+import { emptyProject, genId, PROP_CATALOG } from './defaults'
+import {
+  MAX_PROJECT_FILE_BYTES, safeJsonParse, isPlainObject, isSafeImageDataUrl, isSafeAudioDataUrl,
+  isValidVoiceId, sanitizeScene, sanitizeTopLevel,
+} from './sanitize'
 import { shotStarts, roundTime } from '../core/cutTrack'
 import { normalizeCamKeys } from '../core/cameraTrack'
 
 export function serializeProject(p: Project): string {
   return JSON.stringify(p, null, 2)
 }
-
-const MAX_AUDIO_CHARS = 5_000_000
 
 // v1 カットが持っていた旧 dialogue の形（現行 Shot 型からは削除済み。移設のためだけに読む）
 interface LegacyDialogue {
@@ -52,18 +54,31 @@ function migrateV1toV2(shots: Shot[]): { shots: Shot[]; audioTrack: DialogueClip
   return { shots: outShots, audioTrack }
 }
 
-// v2 読込時の audioTrack 防御的検証: 壊れた要素は捨て、巨大 audio 文字列はメモリ保護のため除去。
+// クリップの URL/パスに入りうる値（voiceId・audio）と型の検証（v1 移設分・v2 読込分の共通処理）
+// voiceId は ElevenLabs の URL パスに入るため英数字のみ、audio は audio の base64 dataURL のみ許可
+function sanitizeClipFields(clip: Record<string, unknown>): void {
+  if (clip.voiceId !== undefined && !isValidVoiceId(clip.voiceId)) clip.voiceId = undefined
+  if (clip.audio !== undefined && !isSafeAudioDataUrl(clip.audio)) clip.audio = undefined
+  if (clip.emotion !== undefined && typeof clip.emotion !== 'string') clip.emotion = undefined
+  if (clip.alignment !== undefined) {
+    const al = clip.alignment
+    const ok = isPlainObject(al) && Array.isArray(al.chars) && Array.isArray(al.starts) && Array.isArray(al.ends)
+    if (!ok) clip.alignment = undefined
+  }
+}
+
+// v2 読込時の audioTrack 防御的検証: 壊れた要素は捨て、不正・巨大な audio 文字列は除去。
 function validateAudioTrack(raw: unknown): DialogueClip[] {
   if (!Array.isArray(raw)) return []
   return raw
-    .filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
+    .filter((c): c is Record<string, unknown> => isPlainObject(c))
     .filter((c) => typeof c.startSec === 'number' && typeof c.durationSec === 'number' && (c.durationSec as number) > 0)
     .map((c) => {
       const clip = { ...c } as Record<string, unknown>
       if (typeof clip.id !== 'string') clip.id = genId('clip')
       if (typeof clip.text !== 'string') clip.text = ''
       if (clip.speaker !== null && typeof clip.speaker !== 'string') clip.speaker = null
-      if (typeof clip.audio === 'string' && clip.audio.length > MAX_AUDIO_CHARS) clip.audio = undefined
+      sanitizeClipFields(clip)
       clip.startSec = roundTime(Math.max(0, clip.startSec as number))
       clip.durationSec = roundTime(clip.durationSec as number)
       return clip as unknown as DialogueClip
@@ -71,31 +86,40 @@ function validateAudioTrack(raw: unknown): DialogueClip[] {
 }
 
 export function deserializeProject(json: string): Project {
+  // 巨大ファイルはパース前に拒否（文字数ベース。UTF-16 1文字≥1バイトなので上限バイト数で十分）
+  if (json.length > MAX_PROJECT_FILE_BYTES) {
+    throw new Error(`プロジェクトファイルが大きすぎます（上限 ${MAX_PROJECT_FILE_BYTES / 1024 / 1024}MB）。`)
+  }
   let raw: unknown
   try {
-    raw = JSON.parse(json)
+    // __proto__ / constructor / prototype キーは全階層で除去（プロトタイプ汚染対策）
+    raw = safeJsonParse(json)
   } catch {
     throw new Error('JSONの解析に失敗しました。ショットマシンのプロジェクトファイルではありません。')
   }
-  if (typeof raw !== 'object' || raw === null) throw new Error('不正なプロジェクトファイルです。')
-  const obj = raw as Omit<Partial<Project>, 'version'> & { version?: number; audioTrack?: unknown }
-  const version = obj.version
+  if (!isPlainObject(raw)) throw new Error('不正なプロジェクトファイルです。')
+  const version = raw.version
   if (version !== 1 && version !== 2) throw new Error(`未対応のバージョンです: ${String(version)}`)
-  if (!obj.scene || !Array.isArray(obj.scene.characters) || !Array.isArray(obj.scene.cameras)) {
+  const rawScene = raw.scene
+  if (!isPlainObject(rawScene) || !Array.isArray(rawScene.characters) || !Array.isArray(rawScene.cameras)) {
     throw new Error('シーンデータが欠落しています。')
   }
   const base = emptyProject()
-  // ショットの防御的検証: 壊れた要素は捨て、巨大サムネイルはメモリ保護のため除去（v1/v2 共通）
-  const MAX_THUMB_CHARS = 5_000_000
+  const obj = sanitizeTopLevel(raw, base as unknown as Record<string, unknown>) as
+    Omit<Partial<Project>, 'version'> & { version?: number; audioTrack?: unknown }
+  const scene = sanitizeScene(rawScene, base.scene.room as unknown as Record<string, unknown>, new Set(Object.keys(PROP_CATALOG)))
+  // ショットの防御的検証: 壊れた要素は捨て、不正・巨大サムネイルは除去（v1/v2 共通）
+  // サムネイルは img src に入るため、アプリが生成する base64 画像 dataURL 以外（外部URL等）は捨てる
   const validShots = (Array.isArray(obj.shots) ? obj.shots : []).filter((s: unknown) => {
-    if (typeof s !== 'object' || s === null) return false
-    const shot = s as Record<string, unknown>
-    const snap = shot.poseSnapshot as Record<string, unknown> | undefined
-    return !!snap && typeof snap.a === 'object' && snap.a !== null
+    if (!isPlainObject(s)) return false
+    const snap = s.poseSnapshot
+    return isPlainObject(snap) && isPlainObject(snap.a)
   }).map((s) => {
     const shot = { ...(s as object) } as Record<string, unknown>
-    if (typeof shot.thumbnail !== 'string' || shot.thumbnail.length > MAX_THUMB_CHARS) shot.thumbnail = ''
-    if (typeof shot.thumbnailB === 'string' && shot.thumbnailB.length > MAX_THUMB_CHARS) shot.thumbnailB = undefined
+    if (!isSafeImageDataUrl(shot.thumbnail)) shot.thumbnail = ''
+    if (shot.thumbnailB !== undefined && !isSafeImageDataUrl(shot.thumbnailB)) shot.thumbnailB = undefined
+    if (typeof shot.cameraId !== 'string') shot.cameraId = ''
+    if (typeof shot.cameraName !== 'string') shot.cameraName = ''
     if (typeof shot.durationSec !== 'number' || !(shot.durationSec > 0)) shot.durationSec = 3
     if (typeof shot.focalLength !== 'number' || !(shot.focalLength >= 5)) shot.focalLength = 35
     if (typeof shot.notes !== 'object' || shot.notes === null) shot.notes = { action: '', camera: '' }
@@ -117,6 +141,7 @@ export function deserializeProject(json: string): Project {
     const migrated = migrateV1toV2(validShots)
     shots = migrated.shots
     audioTrack = migrated.audioTrack
+    audioTrack.forEach((c) => sanitizeClipFields(c as unknown as Record<string, unknown>))
   } else {
     shots = validShots
     audioTrack = validateAudioTrack(obj.audioTrack)
@@ -126,7 +151,7 @@ export function deserializeProject(json: string): Project {
     ...base,
     ...obj,
     version: 2,
-    scene: { ...base.scene, ...obj.scene },
+    scene: { ...base.scene, ...scene },
     shots,
     audioTrack,
   } as unknown as Project

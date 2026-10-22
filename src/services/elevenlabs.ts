@@ -1,11 +1,12 @@
 // ElevenLabs TTS（タイムスタンプ付き＝リップシンク用）。
 // キーはこのブラウザのlocalStorageにのみ保存され、ElevenLabs API以外には送信されない。
 import type { Alignment } from '../model/types'
+import { isValidVoiceId } from '../model/sanitize'
 
 const KEY_STORAGE = 'shotmachine.elevenLabsKey'
-// 優先順位: 手入力（localStorage）→ .envのVITE_ELEVENLABS_API_KEY（ローカル専用ビルドに埋め込み）
-const ENV_KEY = (import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined) ?? null
-export const getElKey = (): string | null => localStorage.getItem(KEY_STORAGE) ?? ENV_KEY
+// BYOK: キーは画面からの手入力（localStorage）のみ。環境変数（VITE_*）からは読まない
+// （VITE_ の値はビルド時にJSバンドルへ平文で焼き込まれるため。scripts/check-bundle.mjs で検査）
+export const getElKey = (): string | null => localStorage.getItem(KEY_STORAGE)
 export const setElKey = (k: string): void => localStorage.setItem(KEY_STORAGE, k)
 export const clearElKey = (): void => localStorage.removeItem(KEY_STORAGE)
 
@@ -57,8 +58,10 @@ export async function ttsWithTimestamps(
 ): Promise<TtsResult> {
   const key = getElKey()
   if (!key) throw new Error('ElevenLabsのAPIキーが設定されていません')
+  // voice_id は URL パスに入る。読み込んだプロジェクトファイル由来の値もあり得るため許可リストで検証
+  if (!isValidVoiceId(voiceId)) throw new Error('ボイスIDが不正です（英数字のみ・64文字以内）')
   const res = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/with-timestamps?output_format=mp3_44100_128`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps?output_format=mp3_44100_128`,
     {
       method: 'POST',
       headers: { 'xi-api-key': key, 'Content-Type': 'application/json' },

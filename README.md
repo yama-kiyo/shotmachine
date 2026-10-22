@@ -32,15 +32,16 @@ npm test           # 単体テスト（Vitest）
 npm run e2e        # E2Eテスト（Playwright・要ビルド済みdist）
 ```
 
-APIキー（いずれも任意）は起動後の画面から入力するか、`.env.example` を `.env` にコピーして設定します。
+APIキー（いずれも任意）は**起動後の画面から入力**します（BYOK）。キーはそのブラウザの localStorage にのみ保存され、各APIへの直接呼び出し以外には送信されません。画面の🔑✕／削除ボタンでいつでも消せます。
 
-| キー | 用途 | 環境変数 |
+| キー | 用途 | 入力場所 |
 |---|---|---|
-| ElevenLabs | TTS＋リップシンク | `VITE_ELEVENLABS_API_KEY` |
-| Anthropic | シーンチャット（日本語でシーン操作） | `VITE_ANTHROPIC_API_KEY` |
+| ElevenLabs | TTS＋リップシンク | スクリプトタブのボイス欄 |
+| Anthropic | シーンチャット（日本語でシーン操作） | シーンチャットタブ |
 
-優先順位は「画面からの手入力（localStorage）→ `.env`」。
-⚠️ `VITE_` の値はビルド時にJSバンドルへ平文で焼き込まれます。キーを入れてビルドした `dist/` は公開しないでください。
+環境変数・`.env` からキーを読む仕組みはありません。`VITE_*KEY` / `VITE_*TOKEN` / `VITE_*SECRET` に値があると `npm run build` が失敗し、`dist/` にキー形状の文字列が混入した場合も失敗します（`scripts/check-bundle.mjs`）。
+
+セキュリティヘッダ（CSP 等）の正本は `vercel.json`。`npm run build && npx vite preview` でも同じヘッダが付き、`e2e/csp.spec.ts` が CSP 違反の有無を検証します。
 
 ## アーキテクチャ
 
@@ -52,8 +53,9 @@ APIキー（いずれも任意）は起動後の画面から入力するか、`.
 
 ## 注意
 
-- `.env`（APIキー）・`dist/`（キーを設定してビルドした場合に埋め込まれる）はコミット対象外（.gitignore済み）
-- APIキーはブラウザのlocalStorageまたは.envのみ。外部送信はElevenLabs / Anthropic APIへの直接呼び出しのみ
+- `.env`・`dist/` はコミット対象外（.gitignore済み）
+- APIキーはブラウザのlocalStorageのみ（BYOK）。外部送信はElevenLabs / Anthropic APIへの直接呼び出しのみ
+- プロジェクトファイル（.shotmachine.json）の読込は上限64MB・型検証・`__proto__` 等の危険キー除去・サムネイル/音声は base64 dataURL のみ・voice_id は英数字のみ（`src/model/sanitize.ts`）
 
 ---
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

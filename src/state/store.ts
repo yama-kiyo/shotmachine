@@ -414,7 +414,10 @@ export const useStore = create<ShotmachineState>()(
         }
         // ボイス割当（未割当の話者のみ）
         const vm = { ...(st.project.voiceMap ?? {}) }
-        plan.allSpeakerNames.forEach((name, i) => { if (!vm[name]) vm[name] = defaultVoiceFor(i) })
+        plan.allSpeakerNames.forEach((name, i) => {
+          // 話者名が constructor 等でも継承プロパティを既存割当と誤認しない
+          if (!Object.prototype.hasOwnProperty.call(vm, name) || !vm[name]) vm[name] = defaultVoiceFor(i)
+        })
         st.project.voiceMap = vm
         // ショット生成＋音声トラック生成（台本取込はショット列・音声トラックを置き換える）
         // 各台本行 → カット1つ＋DialogueClip1つ。clipId で1:1に紐づけ、startSec=カット累積開始。

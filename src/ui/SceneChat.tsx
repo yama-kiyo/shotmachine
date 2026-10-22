@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type Anthropic from '@anthropic-ai/sdk'
-import { getApiKey, setApiKey, clearApiKey, isEnvKey, runChat } from '../services/anthropic'
+import { getApiKey, setApiKey, clearApiKey, runChat } from '../services/anthropic'
 
 interface UiMsg { role: 'user' | 'assistant' | 'tool'; text: string }
 
@@ -91,15 +91,9 @@ export function SceneChat() {
         />
         <button onClick={() => void send()} disabled={busy || !input.trim()} data-testid="chat-send">送信</button>
         <button
-          title={
-            isEnvKey()
-              ? '.env のキーで動作中（削除するものはありません）'
-              : '保存したAPIキーを削除'
-          }
-          disabled={isEnvKey()}
+          title="保存したAPIキーを削除"
           onClick={() => {
             clearApiKey()
-            // .env にキーがあれば削除後もそちらで動く。入力画面へ戻さない
             setHasKey(!!getApiKey())
             setMsgs([])
           }}

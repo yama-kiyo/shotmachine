@@ -320,14 +320,12 @@ test.describe('ショットマシン 主要フロー', () => {
     await page.getByTestId('outliner-cam-CAM-C').click()
     const posY = page.getByTestId('cam-pos-y')
     const before = parseFloat(await posY.inputValue())
-    // チャットタブへ。キー入力画面は「.env に VITE_ANTHROPIC_API_KEY があるとスキップされる」ので、
-    // 開発環境の .env 有無に左右されないよう、画面が出た場合だけ入力する
+    // チャットタブへ。キーは画面からの手入力のみ（BYOK・環境変数フォールバックなし）なので必ず入力画面が出る
     await page.getByTestId('tab-chat').click()
     const keyInput = page.getByTestId('api-key-input')
-    if (await keyInput.isVisible().catch(() => false)) {
-      await keyInput.fill('sk-ant-test-mock-key')
-      await page.getByTestId('api-key-save').click()
-    }
+    await expect(keyInput).toBeVisible()
+    await keyInput.fill('sk-ant-test-mock-key')
+    await page.getByTestId('api-key-save').click()
     await expect(page.getByTestId('chat-input')).toBeVisible()
     await page.getByTestId('chat-input').fill('もっとローアングルにして')
     await page.getByTestId('chat-send').click()
