@@ -1,4 +1,4 @@
-name: Test & Deploy to GitHub Pages
+name: Test & Deploy retirement page to GitHub Pages
 
 on:
   push:
@@ -27,6 +27,9 @@ jobs:
       - run: npm test
       - run: npx tsc --noEmit
 
+  # GitHub Pages 退役版: アプリはビルド・公開しない。pages-retire/ の静的ページだけを Pages に公開する
+  # （localStorage の shotmachine.apiKey / shotmachine.elevenLabsKey を削除し、新URLへ誘導）。
+  # アプリ本体の公開は Vercel（vercel.json・npm run build → dist/ のみ）。pages-retire/ は dist に入らない。
   build-deploy:
     needs: test
     runs-on: ubuntu-latest
@@ -35,19 +38,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      # npm run build = tsc -b → vite build → scripts/check-bundle.mjs（キー混入でビルド失敗）
-      - run: npm run build
-      - run: cp dist/index.html dist/404.html
       - uses: actions/configure-pages@v5
         with:
           enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: pages-retire
       - id: deployment
         uses: actions/deploy-pages@v4
